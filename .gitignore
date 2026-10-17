@@ -7,6 +7,7 @@ claude-session-backups/
 *.download
 
 node_modules/
+.test-tmp/
 Thumbs.db
 desktop.ini
 .DS_Store

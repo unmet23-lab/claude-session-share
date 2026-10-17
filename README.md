@@ -25,7 +25,17 @@ Claude 데스크톱(Windows)의 Code 탭에서 계정을 바꿔도 세션 목록
 - 한 폴더에서 생기거나 바뀌거나 지워진 파일을 나머지 폴더 전부에 옮깁니다.
 - 같은 파일이 폴더마다 다르면 더 최근에 바뀐 쪽이 이깁니다.
 - 앱이 지운 세션은 다른 폴더에 옛 사본이 있어도 되살리지 않습니다.
+- 예약 작업 목록(`scheduled-tasks.json`)은 파일째 맞추지 않고 작업마다 합칩니다. 아래 「예약 작업」을 보세요.
 - Cowork 세션 폴더(`local-agent-mode-sessions`)도 같은 방식으로 맞춥니다.
+
+### 예약 작업
+
+앱은 계정에 로그인할 때마다 그 계정의 예약 작업 목록을 다시 씁니다. 처음 로그인하는 계정에는 빈 목록을 새로 씁니다. 파일째 「최근 것이 이김」으로 맞추면 이 빈 목록이 다른 계정의 예약까지 모두 지웁니다. 그래서 예약 목록만은 작업마다 합칩니다.
+
+- 어느 계정에서 만든 작업이든 모든 계정 목록에 더합니다. 같은 작업이 다르면 더 최근에 바뀐 쪽으로 맞춥니다.
+- 작업이 빠지면 앱이 그 계정에서 실제로 알던 작업이 하나 빠졌을 때만 지운 것으로 봅니다. 「실제로 알던 작업」은 로그인할 때 읽었거나 그 계정에서 직접 만든 작업입니다.
+- 처음 로그인한 계정의 빈 목록, 앱이 아직 모르는 작업(다른 계정에서 넘어온 것), 한 번에 둘 이상 빠진 경우는 지우지 않고 되살립니다.
+- 지금 쓰는 계정의 목록에 작업을 되살린 경우, 앱은 그 작업을 Claude를 껐다 켠 뒤에 다시 돌립니다. 이때는 윈도 알림으로 알려 줍니다.
 
 짝 폴더를 연결 폴더(junction·symlink)로 묶으면 더 간단할 것 같지만, 앱이 연결 폴더에는 세션 저장을 거부합니다. 앱 기록(`main.log`)에 `Refusing non-directory at private dir path (symlink/file plant)`가 남습니다. 그래서 실제 폴더끼리 복사해 맞춥니다.
 
@@ -82,7 +92,7 @@ powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\claude-session-share
 - **비공식 도구입니다.** Anthropic과 관계없습니다. 앱이 저장 방식을 바꾸면 동작하지 않을 수 있습니다.
 - **확인한 환경은 하나입니다.** Windows 11의 Claude 데스크톱 2.42304.0, Microsoft Store판에서 확인했습니다. 일반 설치판의 `%APPDATA%\Claude`도 찾도록 했지만 직접 확인하지는 못했습니다.
 - **백업을 만듭니다.** 처음 설치할 때 모든 계정 폴더를 통째로 백업합니다. 그 뒤로는 세션 기록이 가장 많은 폴더를 매시간 백업하고 최근 24개를 남깁니다.
-- **같은 이름 파일은 합쳐지지 않습니다.** 예약 작업 목록과 보관 목록은 계정마다 하나씩인데, 가장 최근에 바뀐 것으로 모두 맞춰집니다. 계정마다 다른 예약 작업을 쓰고 있었다면 설치 뒤 확인하고, 필요하면 백업에서 되돌리세요.
+- **보관 목록은 합쳐지지 않습니다.** 보관 목록(`archived-sessions.idx`)은 계정마다 하나씩인데, 가장 최근에 바뀐 것으로 모두 맞춰집니다. 예약 작업 목록은 위처럼 작업마다 합칩니다.
 - **처음 보는 계정은 한 번 재시작이 필요합니다.** 앱이 처음 로그인한 계정에서는 빈 목록을 먼저 읽습니다. 도구가 그 폴더를 바로 채우고 윈도 알림으로 알려 주니, 그때 한 번만 껐다 켜면 됩니다. 그 뒤로는 계정을 바꾸면 바로 보입니다.
 - **Mac과 Linux는 지원하지 않습니다.**
 
@@ -165,7 +175,8 @@ The uninstaller stops the watcher and removes the Startup entry. It asks before 
 - This is an unofficial tool and is not affiliated with Anthropic.
 - It was tested only with Claude desktop 2.42304.0 from the Microsoft Store on Windows 11.
 - The first install backs up every account folder. While running, it backs up the fullest folder every hour and keeps the last 24.
-- Single files such as the scheduled task list and the archive index are not merged. The newest copy wins everywhere.
+- The archive index is not merged; the newest copy wins everywhere.
+- The scheduled task list (`scheduled-tasks.json`) is merged task by task instead. The app rewrites this list on every sign-in and writes an empty one for a new account, which would otherwise wipe every account's tasks. A task counts as deleted only when one task the app actually knew in that account (read at sign-in or created there) disappears. An empty list from a new account, tasks the app has not loaded yet, and several tasks vanishing at once are restored instead. If tasks are restored into the account you are using, restart Claude so it runs them again.
 - The first time you sign in with a new account, the app reads an empty list. The tool fills the folder at once and shows a Windows notification. Restart Claude once and the sessions appear.
 - macOS and Linux are not supported.
 - Messages from the installer and the script are in Korean.

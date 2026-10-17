@@ -9,6 +9,8 @@
 //   - 모든 짝 폴더를 실제 폴더로 두고(남은 junction은 실제 폴더로 바꾼다), 어느 한 폴더의 변화(추가·수정·삭제)를 나머지 전부에 옮긴다.
 //   - 같은 파일이 폴더마다 다르면 더 최근(mtime) 것이 이긴다. 삭제는 「지난번엔 있었는데 없어진」 폴더에서만 읽어 전파한다.
 //   - 세션 기록(local_*.json)은 삭제 표식(deleted_<CLI 세션ID>)이 어디든 있으면 지운 것으로 보고 되살리지 않는다.
+//   - 예약 작업 목록(scheduled-tasks.json)만은 파일째 맞추지 않고 작업(id)마다 합친다. 앱은 로그인할 때마다 목록을 다시 쓰고
+//     처음 보는 짝엔 빈 목록을 써서, 「최근 것이 이김」이면 그 빈 목록이 모든 계정의 예약을 지운다(아래 「예약 작업 목록」).
 //   - 앱이 처음 보는 짝으로 로그인하면(main.log 「Loaded 0 persisted sessions from …」) 그 폴더를 바로 채우고 윈도 알림으로 「껐다 켜기」를 알린다.
 //   - 대화 원문(~/.claude/projects)은 계정과 상관없이 하나라 손대지 않는다.
 //   - --once --backup은 맞추기 전에 모든 짝 폴더를 통째로 백업한다. 지켜보는 동안엔 가장 기록이 많은 폴더를 매시간 백업한다(최근 24개).
@@ -47,6 +49,9 @@ const LOADED_LINE = /Loaded (\d+) persisted sessions from (\S+?)[\\/]([0-9a-f-]{
 const LOGOUT_LINE = /\[LocalSessionManager\] Account logged out/g;
 // 앱이 쓰다 만 임시 파일(.tmp-<pid>-<uuid>, 이름.tmp-숫자10자리hex6자리)과 우리 임시 파일(.mirror-…)은 건너뛴다.
 const isTempName = (n) => n.startsWith(".") || /\.tmp-\d{10}[a-f0-9]{6}$/.test(n);
+// 짝 폴더 맨 위의 예약 작업 목록. 파일 미러에서 빼고 syncRegistry가 작업마다 합친다.
+const REGISTRY = "scheduled-tasks.json";
+const RESTORE_NOTE_MS = 3600000;
 
 const tryJson = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
 const safeReaddir = (p) => { try { return fs.readdirSync(p); } catch { return []; } };
@@ -198,6 +203,7 @@ function scanDir(dir, prev) {
     try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
     for (const e of ents) {
       if (isTempName(e.name) || e.isSymbolicLink()) continue;
+      if (!rel && e.name === REGISTRY) continue; // 예약 작업 목록은 syncRegistry가 맡는다
       const p = path.join(d, e.name), r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) { walk(p, r); continue; }
       if (!e.isFile()) continue;
@@ -302,6 +308,7 @@ function syncTree(ctx, tree, opts = {}) {
     (scans.get(u.src) || manifests.get(u.src))?.set(rel, { m: u.m, s: u.s });
   }
   for (const rel of deletes) {
+    if (rel === REGISTRY) { delete union[rel]; continue; } // 옛 상태에 남은 목록 줄 때문에 파일을 지우지 않는다
     for (const d of dirs) {
       const p = path.join(d, rel);
       if (kind(p) !== "file") continue;
@@ -321,6 +328,133 @@ function syncTree(ctx, tree, opts = {}) {
   }
   ctx.stateDirty = true;
   return { copied, removed };
+}
+
+/* ---------- 예약 작업 목록 ---------- */
+// scheduled-tasks.json은 파일째 「최근 것이 이김」으로 맞추지 않는다. 앱은 로그인할 때마다 그 짝의 목록을 다시 쓰고,
+// 처음 로그인한 짝에는 빈 목록을 새로 쓴다. 그 빈 파일이 가장 최근이 되면 모든 계정의 예약이 지워진다(2026-10-17에 겪음).
+// 그래서 작업(id) 단위로 합친다.
+//   - 어느 폴더에든 새로 생긴 작업은 모두에 더한다. 같은 작업이 폴더마다 다르면 더 최근에 바뀐 파일의 것으로 맞춘다.
+//   - 작업이 빠진 것은 「앱이 그 짝에 로그인할 때 읽었거나 그 짝에서 만든 작업」이 하나 빠졌을 때만 지운 것으로 본다.
+//     처음 로그인한 짝의 빈 목록, 미러가 나중에 넣어 줘서 앱이 아직 모르는 작업, 한 번에 둘 이상 빠진 것은 지우지 않고 되살린다.
+//   - 나머지 칸은 가장 최근 파일을 바탕으로 하고, recordedSkips는 모든 폴더 것을 합친다.
+// state.tasks[tree] = { union: {id → {r: 작업, m: 그 판이 나온 파일 시각}}, order: [id…], known: {짝 → [id…]}, dirs: {폴더 → {m, s, ids}} }
+function stable(v) {
+  if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable(v[k])}`).join(",")}}`;
+  return JSON.stringify(v);
+}
+const dirPair = (d) => pairKey(path.basename(path.dirname(d)), path.basename(d));
+
+function readRegistry(d) {
+  const p = path.join(d, REGISTRY);
+  let st;
+  try { st = fs.statSync(p); } catch { return null; }
+  const head = { m: Math.round(st.mtimeMs), s: st.size };
+  const j = tryJson(p);
+  if (!j || typeof j !== "object" || !Array.isArray(j.scheduledTasks)) return { ...head, bad: true };
+  return { ...head, j, ids: j.scheduledTasks.map((t) => t && t.id).filter(Boolean) };
+}
+
+function writeRegistry(d, text) {
+  const tmp = path.join(d, `.mirror-${process.pid}-${crypto.randomBytes(4).toString("hex")}`);
+  try {
+    fs.writeFileSync(tmp, text);
+    fs.renameSync(tmp, path.join(d, REGISTRY));
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    throw e;
+  }
+}
+
+function syncRegistry(ctx, tree, inits = []) {
+  const { state } = ctx;
+  const dirs = ctx.family[tree] || [];
+  if (dirs.length === 0) return;
+  const all = (state.tasks ||= {});
+  const fresh = !all[tree];
+  const R = (all[tree] ||= { union: {}, order: [], known: {}, dirs: {} });
+  const now = new Map();
+  for (const d of dirs) now.set(d, readRegistry(d));
+  const dirOf = (key) => dirs.find((x) => dirPair(x) === key);
+
+  // 처음 켤 때는 지금 계정의 앱이 자기 폴더 목록을 읽었다고 본다.
+  if (fresh && state.active) { const cur = now.get(dirOf(state.active)); if (cur?.ids) R.known[state.active] = cur.ids.slice(); }
+  // 로그인: 앱이 그 짝의 목록을 읽었다. 그때 파일에 있던 작업만 앱이 안다(처음 보는 짝이면 하나도 모른다).
+  for (const key of inits) { const cur = now.get(dirOf(key)); R.known[key] = cur?.ids ? cur.ids.slice() : []; }
+
+  const changed = dirs.filter((d) => {
+    const cur = now.get(d), prev = R.dirs[lower(d)];
+    return cur && !cur.bad && !(prev && prev.m === cur.m && prev.s === cur.s);
+  }).sort((a, b) => now.get(a).m - now.get(b).m);
+  if (!changed.length && !inits.length && dirs.every((d) => now.get(d))) return;
+
+  const restored = new Map(); // 짝 → 되살린 id들
+  for (const d of changed) {
+    const cur = now.get(d), key = dirPair(d), prev = R.dirs[lower(d)];
+    for (const t of cur.j.scheduledTasks) {
+      if (!t || !t.id) continue;
+      const u = R.union[t.id];
+      if (!u) {
+        R.union[t.id] = { r: t, m: cur.m };
+        if (!R.order.includes(t.id)) R.order.push(t.id);
+        if (key === state.active && !(R.known[key] ||= []).includes(t.id)) R.known[key].push(t.id);
+        log(`${tree} 예약 작업 +${t.id} (${short(key)})`);
+      } else if (cur.m >= u.m && stable(u.r) !== stable(t)) {
+        R.union[t.id] = { r: t, m: cur.m };
+      }
+    }
+    if (prev?.ids) {
+      const gone = prev.ids.filter((id) => R.union[id] && !cur.ids.includes(id));
+      const known = R.known[key];
+      const real = known ? gone.filter((id) => known.includes(id)) : gone;
+      if (real.length === 1) {
+        const id = real[0];
+        delete R.union[id];
+        R.order = R.order.filter((x) => x !== id);
+        for (const k of Object.keys(R.known)) R.known[k] = R.known[k].filter((x) => x !== id);
+        log(`${tree} 예약 작업 -${id} (${short(key)}에서 지움)`);
+      }
+      const kept = gone.filter((id) => R.union[id]);
+      if (kept.length) {
+        restored.set(key, kept);
+        const why = real.length > 1 ? `한 번에 ${real.length}개가 빠짐` : "앱이 모르는 작업";
+        const msg = `${tree} 예약 작업 ${kept.length}개가 ${short(key)}에서 빠졌지만 지우지 않고 되살림(${why}): ${kept.join(", ")}`;
+        if (ctx.lastRestoreMsg !== msg) { log(msg); ctx.lastRestoreMsg = msg; }
+      }
+    }
+    R.dirs[lower(d)] = { m: cur.m, s: cur.s, ids: cur.ids.slice() };
+  }
+
+  // 맞출 판: 가장 최근 파일을 바탕으로, 작업 목록은 합친 것, recordedSkips는 모두 합친 것.
+  const valid = dirs.map((d) => now.get(d)).filter((c) => c && !c.bad).sort((a, b) => a.m - b.m);
+  const want = valid.length ? { ...valid[valid.length - 1].j } : { scheduledTasks: [], recordedSkips: {} };
+  const skips = {};
+  for (const c of valid) if (c.j.recordedSkips && typeof c.j.recordedSkips === "object") Object.assign(skips, c.j.recordedSkips);
+  want.scheduledTasks = R.order.filter((id) => R.union[id]).map((id) => R.union[id].r);
+  if ("recordedSkips" in want || Object.keys(skips).length) want.recordedSkips = skips;
+  const wantKey = stable(want), text = JSON.stringify(want, null, 2), ids = want.scheduledTasks.map((t) => t.id);
+  let wrote = 0;
+  for (const d of dirs) {
+    const cur = now.get(d);
+    if (cur?.bad) continue; // 앱이 쓰는 중일 수 있다. 다음 바퀴에 다시 본다.
+    if (cur && stable(cur.j) === wantKey) continue;
+    try {
+      writeRegistry(d, text);
+      const st = fs.statSync(path.join(d, REGISTRY));
+      R.dirs[lower(d)] = { m: Math.round(st.mtimeMs), s: st.size, ids: ids.slice() };
+      ctx.dirMtimes?.set(lower(d), mtime(d));
+      wrote++;
+    } catch (e) { log(`${tree} 예약 목록 쓰기 실패(${short(dirPair(d))}): ${e.code || ""} ${e.message}`); }
+  }
+  if (wrote) log(`${tree} 예약 목록을 ${ids.length}개(${ids.join(", ") || "없음"})로 ${wrote}곳 맞춤`);
+  // 지금 계정의 앱은 되살린 작업을 아직 모른다(메모리의 목록으로 돌린다). 껐다 켜야 다시 돈다.
+  const mine = restored.get(state.active);
+  if (mine && ctx.daemon && Date.now() - (ctx.lastRestoreNote || 0) >= RESTORE_NOTE_MS) {
+    ctx.lastRestoreNote = Date.now();
+    notify("Claude 세션 공유", `예약 작업 ${mine.length}개가 이 계정 목록에서 빠져 다시 넣었어요. Claude를 한 번 껐다 켜면 다시 돌아요.`);
+  }
+  ctx.stateDirty = true;
 }
 
 /* ---------- 짝 폴더 준비 ---------- */
@@ -441,6 +575,7 @@ function tick(ctx, opts = {}) {
   if (full) ctx.lastFull = Date.now();
   for (const tree of TREES) {
     try { syncTree(ctx, tree, { full }); } catch (e) { log(`${tree} 맞추기 오류: ${e.code || ""} ${e.message}`); for (const d of ctx.family[tree] || []) ctx.dirty.add(lower(d)); }
+    try { syncRegistry(ctx, tree, ev.inits); } catch (e) { log(`${tree} 예약 목록 맞추기 오류: ${e.code || ""} ${e.message}`); }
   }
   let filled = 0;
   for (const e of emptyLoads) {
@@ -490,7 +625,9 @@ function runTick(ctx) {
 function loadState() {
   const s = tryJson(STATE_PATH) || {};
   // v1(junction 판) 상태에서 이어받을 것: 로그 위치·알려진 짝·지금 계정. home은 더 쓰지 않는다.
-  return { v: 2, logPath: s.logPath, logOffset: s.logOffset || 0, known: s.known || {}, active: s.active || null, union: s.v === 2 ? s.union || {} : {}, synced: s.v === 2 ? s.synced || {} : {} };
+  const union = s.v === 2 ? s.union || {} : {};
+  for (const tree of TREES) if (union[tree]) delete union[tree][REGISTRY]; // 예약 목록은 파일 미러에서 뺐다
+  return { v: 2, logPath: s.logPath, logOffset: s.logOffset || 0, known: s.known || {}, active: s.active || null, union, synced: s.v === 2 ? s.synced || {} : {}, tasks: s.v === 2 ? s.tasks || {} : {} };
 }
 
 function makeCtx(daemon) {
@@ -516,10 +653,14 @@ function printStatus(ctx) {
     for (const r of roots) for (const key of pairsFromDirs(path.join(r, tree))) {
       const p = path.join(r, tree, ...key.split("/")), k = kind(p);
       const n = k === "dir" ? countRecords(p) : 0;
-      const extra = k === "dir" ? `${n}개 세션 기록, 파일 ${scanDir(p).size}개` : k === "link" ? "연결(걷어낼 것)" : k;
+      const reg = k === "dir" ? readRegistry(p) : null;
+      const tasks = reg ? (reg.bad ? ", 예약 목록 읽기 실패" : `, 예약 ${reg.ids.length}개`) : "";
+      const extra = k === "dir" ? `${n}개 세션 기록, 파일 ${scanDir(p).size}개${tasks}` : k === "link" ? "연결(걷어낼 것)" : k;
       rows.push(`${key === state.active ? "★" : " "} ${key}  ${extra}${synced.has(lower(p)) ? "" : "  (아직 안 맞춤)"}`);
     }
     console.log(`${tree}: ${rows.length}곳, 공통 파일 ${Object.keys(state.union[tree] || {}).length}개`);
+    const R = state.tasks?.[tree];
+    if (R) { const ids = R.order.filter((id) => R.union[id]); console.log(`  예약 작업 ${ids.length}개${ids.length ? `: ${ids.join(", ")}` : ""}`); }
     for (const row of rows) console.log(row);
   }
   const snaps = snapshotDirs();
