@@ -1,0 +1,12 @@
+# Runtime files. They only land here if CLAUDE_SESSION_SHARE_HOME points at this folder.
+claude-session-share.json
+claude-session-share.json.tmp
+claude-session-share.log
+claude-session-share.pid
+claude-session-backups/
+*.download
+
+node_modules/
+Thumbs.db
+desktop.ini
+.DS_Store

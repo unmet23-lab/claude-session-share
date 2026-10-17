@@ -1,0 +1,10 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+
+# install.ps1 and uninstall.ps1 must stay UTF-8 *without* a BOM: `irm ... | iex` cannot parse a BOM.
+[*.ps1]
+charset = utf-8
