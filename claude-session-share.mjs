@@ -47,8 +47,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const INIT_LINE = /\[LocalSessionManager\] Initialization succeeded — accountId=([0-9a-f-]{36}), orgId=([0-9a-f-]{36})/g;
 const LOADED_LINE = /Loaded (\d+) persisted sessions from (\S+?)[\\/]([0-9a-f-]{36})[\\/]([0-9a-f-]{36})(?=\s|$)/g;
 const LOGOUT_LINE = /\[LocalSessionManager\] Account logged out/g;
-// 앱이 쓰다 만 임시 파일(.tmp-<pid>-<uuid>, 이름.tmp-숫자10자리hex6자리)과 우리 임시 파일(.mirror-…)은 건너뛴다.
-const isTempName = (n) => n.startsWith(".") || /\.tmp-\d{10}[a-f0-9]{6}$/.test(n);
+// 앱이 쓰다 만 임시 파일(.tmp-<pid>-<uuid>, 이름.tmp-숫자10자리hex6자리, 이름.json.tmp)과 우리 임시 파일(.mirror-…)은 건너뛴다.
+// 이름.json.tmp는 앱이 쓰고 곧바로 이름을 바꾸는 파일이라, 옮기려 하면 「복사 실패: ENOENT」만 남는다(2026-10-18 기록 202줄).
+const isTempName = (n) => n.startsWith(".") || /\.tmp-\d{10}[a-f0-9]{6}$/.test(n) || /\.tmp$/i.test(n);
 // 짝 폴더 맨 위의 예약 작업 목록. 파일 미러에서 빼고 syncRegistry가 작업마다 합친다.
 const REGISTRY = "scheduled-tasks.json";
 const RESTORE_NOTE_MS = 3600000;
@@ -127,7 +128,7 @@ function redirectedTo() {
     return null;
   } finally { try { fs.unlinkSync(probe); } catch {} }
 }
-const BOXED_MSG = (pkg) => `이 창은 ${pkg} 앱 안에서 열린 터미널이라 AppData 쓰기가 그 앱 전용 폴더로 돌려집니다. 시작 메뉴에서 PowerShell을 새로 열어 실행하세요.`;
+const BOXED_MSG = (pkg) => `이 창은 ${pkg.split("_")[0]} 같은 앱 안에서 연 터미널이라 여기서는 제대로 돌지 않습니다(이런 창에서는 AppData 파일이 그 앱 전용 폴더로 돌려집니다). 시작 단추 → powershell 입력 → Enter로 PowerShell을 따로 열어 다시 실행하세요.`;
 
 function findMainLog() {
   const cands = [path.join(LOCAL, "Claude", "logs", "main.log"), path.join(ROAMING, "Claude", "logs", "main.log")];
@@ -644,24 +645,35 @@ function runningPid() {
 function printStatus(ctx) {
   const state = ctx?.state || loadState();
   const roots = findRoots();
-  console.log(`앱 데이터: ${roots.join(" ; ") || "(못 찾음)"}`);
-  console.log(`지켜보기: ${runningPid() ? `실행 중 (pid ${runningPid()})` : "꺼져 있음"}`);
-  console.log(`지금 계정: ${state.active ? short(state.active) : "(로그아웃 또는 모름)"}`);
+  const running = runningPid();
+  console.log(`앱 데이터: ${roots.join(" ; ") || "(못 찾음 — Code 탭을 쓰기 시작하면 생깁니다)"}`);
+  console.log(`지켜보기: ${running ? `실행 중 (pid ${running})` : "꺼져 있음 — 설치 한 줄을 다시 실행하면 켜집니다"}`);
+  console.log(`지금 계정: ${state.active ? short(state.active) : "(로그아웃 상태이거나 아직 모름 — Claude에 로그인하면 표시)"}`);
+  const LABEL = { "claude-code-sessions": "Code 탭 세션", "local-agent-mode-sessions": "Cowork 세션" };
   for (const tree of TREES) {
     const synced = new Set((state.synced[tree] || []).map(lower));
     const rows = [];
+    const sums = []; // 맞춰졌는지 한 줄로 판정하려고 폴더마다 (세션 기록 수, 파일 수, 맞춤 여부)를 모은다
     for (const r of roots) for (const key of pairsFromDirs(path.join(r, tree))) {
       const p = path.join(r, tree, ...key.split("/")), k = kind(p);
       const n = k === "dir" ? countRecords(p) : 0;
+      const files = k === "dir" ? scanDir(p).size : 0;
       const reg = k === "dir" ? readRegistry(p) : null;
       const tasks = reg ? (reg.bad ? ", 예약 목록 읽기 실패" : `, 예약 ${reg.ids.length}개`) : "";
-      const extra = k === "dir" ? `${n}개 세션 기록, 파일 ${scanDir(p).size}개${tasks}` : k === "link" ? "연결(걷어낼 것)" : k;
-      rows.push(`${key === state.active ? "★" : " "} ${key}  ${extra}${synced.has(lower(p)) ? "" : "  (아직 안 맞춤)"}`);
+      const extra = k === "dir" ? `${n}개 세션 기록, 파일 ${files}개${tasks}` : k === "link" ? "바로 가기 폴더(다음 맞춤 때 실제 폴더로 바꿈)" : k;
+      const ok = synced.has(lower(p));
+      rows.push(`${key === state.active ? "★" : " "} ${key}  ${extra}${ok ? "" : "  (아직 안 맞춤 — 몇 초 뒤 다시 보세요)"}`);
+      sums.push({ n, files, dir: k === "dir", ok });
     }
-    console.log(`${tree}: ${rows.length}곳, 공통 파일 ${Object.keys(state.union[tree] || {}).length}개`);
+    console.log(`${LABEL[tree] || tree}(${tree}): ${rows.length}곳, 맞춘 파일 ${Object.keys(state.union[tree] || {}).length}개`);
     const R = state.tasks?.[tree];
     if (R) { const ids = R.order.filter((id) => R.union[id]); console.log(`  예약 작업 ${ids.length}개${ids.length ? `: ${ids.join(", ")}` : ""}`); }
     for (const row of rows) console.log(row);
+    // 판정 한 줄: 처음 보는 사람도 표를 다 읽지 않고 알 수 있게
+    if (sums.length === 0) console.log("  (없음 — 쓰지 않으면 정상입니다)");
+    else if (sums.length === 1) console.log("  (계정 폴더가 하나뿐 — 다른 계정으로 로그인하면 함께 맞춥니다)");
+    else if (sums.every((s) => s.dir && s.ok && s.n === sums[0].n && s.files === sums[0].files)) console.log(`  ○ ${sums.length}곳이 모두 같습니다(세션 ${sums[0].n}개)`); // ○·△는 한글 기본 글꼴(KS X 1001)에 있어 옛 콘솔에서도 보인다
+    else console.log(`  △ 아직 서로 다른 폴더가 있습니다 — ${running ? "몇 초 뒤 다시 보세요" : "지켜보기가 꺼져 있습니다. 설치 한 줄을 다시 실행하세요"}`);
   }
   const snaps = snapshotDirs();
   console.log(`백업: ${snaps.length}개${snaps[0] ? `, 최근 ${path.basename(snaps[0])}` : ""}`);
@@ -675,7 +687,7 @@ if (mode === "help") {
   console.log(`claude-session-share — Claude 데스크톱 세션 목록을 모든 계정 폴더에 똑같이 맞춘다
   node claude-session-share.mjs                  계속 지켜보기(보통은 시작프로그램이 띄운다)
   node claude-session-share.mjs --once           한 번 맞추고 끝
-  node claude-session-share.mjs --once --backup  모든 짝 폴더를 먼저 백업하고 한 번 맞추기
+  node claude-session-share.mjs --once --backup  모든 계정 폴더를 먼저 백업하고 한 번 맞추기
   node claude-session-share.mjs --status         상태 보기
 데이터 폴더: ${DATA_DIR}`);
 } else if (mode === "status") {

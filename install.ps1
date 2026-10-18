@@ -71,19 +71,35 @@ $Body = @'
 
         if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) { Say 'Windows 전용입니다. Mac·Linux는 지원하지 않습니다.' 'Yellow'; return }
 
-        # 1. Node.js 20 이상
+        # 1. Claude·Codex 같은 스토어 앱 안의 터미널이면 멈춘다(AppData 쓰기가 앱 전용 폴더로 돌려져 PC를 켤 때 실행되지 않는다).
+        #    Node.js보다 먼저 본다 — Claude에게 「설치해 줘」라고 시킨 경우 두 번 막히지 않게.
+        $packages = Join-Path $env:LOCALAPPDATA 'Packages'
+        $probeName = ".claude-session-share-probe-$PID"
+        $probe = Join-Path $env:LOCALAPPDATA $probeName
+        [IO.File]::WriteAllText($probe, '')
+        $boxed = @(Get-ChildItem -LiteralPath $packages -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "LocalCache\Local\$probeName") } | Select-Object -First 1)
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        if ($boxed.Count) {
+            Say "이 창은 $($boxed[0].Name.Split('_')[0]) 같은 앱 안에서 연 터미널이라 여기서는 설치가 제대로 되지 않습니다(PC를 켤 때 자동 실행되지 않습니다)." 'Yellow'
+            Say '시작 단추 → powershell 입력 → Enter로 PowerShell을 따로 열어 같은 한 줄을 다시 붙여 넣으세요.' 'Yellow'
+            return
+        }
+
+        # 2. Node.js 20 이상
         $node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $node) {
-            Say 'Node.js가 없습니다. Node.js 20 이상(LTS)을 설치한 뒤 새 PowerShell 창에서 다시 실행하세요.' 'Yellow'
-            Say '  winget install OpenJS.NodeJS.LTS    (또는 https://nodejs.org 에서 LTS 설치)' 'Yellow'
+            Say 'Node.js가 없습니다. 먼저 Node.js(LTS)를 설치하세요.' 'Yellow'
+            Say '  https://nodejs.org 에서 초록색 LTS 단추로 받아 설치  (또는 이 창에서: winget install OpenJS.NodeJS.LTS)' 'Yellow'
+            Say '설치가 끝나면 이 창을 닫고 PowerShell을 새로 열어 같은 한 줄을 다시 붙여 넣으세요(이 창은 방금 설치한 Node.js를 못 찾습니다).' 'Yellow'
             return
         }
         $version = (& $node.Source --version | Out-String).Trim()
         $major = 0
         if ($version -match '^v(\d+)\.') { $major = [int]$Matches[1] }
         if ($major -lt 20) {
-            Say "Node.js $version 은(는) 너무 오래됐습니다. 20 이상(LTS)으로 올린 뒤 다시 실행하세요." 'Yellow'
-            Say '  winget install OpenJS.NodeJS.LTS' 'Yellow'
+            Say "Node.js $version 은(는) 너무 오래됐습니다. 20 이상(LTS)이 필요합니다." 'Yellow'
+            Say '  https://nodejs.org 에서 LTS를 받아 설치  (또는 이 창에서: winget install OpenJS.NodeJS.LTS)' 'Yellow'
+            Say '설치가 끝나면 PowerShell을 새로 열어 같은 한 줄을 다시 붙여 넣으세요.' 'Yellow'
             return
         }
         $NodeExe = $node.Source
@@ -91,30 +107,17 @@ $Body = @'
         if ($NodeExe -match 'fnm_multishells') { $NodeExe = (& $NodeExe -p 'process.execPath' | Out-String).Trim() }
         Say "  Node.js $version  ($NodeExe)"
 
-        # 2. Claude 데스크톱 세션 폴더(스토어판 또는 일반 설치판)
+        # 3. Claude 데스크톱 세션 폴더(스토어판 또는 일반 설치판)
         $roots = @()
-        $packages = Join-Path $env:LOCALAPPDATA 'Packages'
         if (Test-Path -LiteralPath $packages) {
             $roots += @(Get-ChildItem -LiteralPath $packages -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'LocalCache\Roaming\Claude' })
         }
         $roots += Join-Path $env:APPDATA 'Claude'
         $found = @($roots | Where-Object { (Test-Path -LiteralPath (Join-Path $_ 'claude-code-sessions')) -or (Test-Path -LiteralPath (Join-Path $_ 'local-agent-mode-sessions')) })
         if ($found.Count -eq 0) {
-            Say '  Claude 데스크톱의 세션 폴더를 아직 못 찾았습니다. 설치는 계속하고, 앱에서 로그인하면 그때부터 맞춥니다.' 'Yellow'
+            Say '  아직 Code 탭을 쓴 적이 없는 것 같습니다(세션 폴더가 없음). 설치는 그대로 끝나고, Code 탭을 쓰기 시작하면 자동으로 맞춥니다.' 'Yellow'
         } else {
             foreach ($r in $found) { Say "  Claude 데이터: $r" }
-        }
-
-        # 3. Claude·Codex 같은 스토어 앱 안의 터미널이면 멈춘다(AppData 쓰기가 앱 전용 폴더로 돌려져 로그인 때 실행되지 않는다)
-        $probeName = ".claude-session-share-probe-$PID"
-        $probe = Join-Path $env:LOCALAPPDATA $probeName
-        [IO.File]::WriteAllText($probe, '')
-        $boxed = @(Get-ChildItem -LiteralPath $packages -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "LocalCache\Local\$probeName") } | Select-Object -First 1)
-        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
-        if ($boxed.Count) {
-            Say "이 창은 $($boxed[0].Name) 앱 안에서 열린 터미널이라 AppData 쓰기가 그 앱 전용 폴더로 돌려집니다." 'Yellow'
-            Say '이대로 설치하면 로그인할 때 실행되지 않습니다. 시작 메뉴에서 PowerShell을 새로 열어 다시 실행하세요.' 'Yellow'
-            return
         }
 
         # 4. 새 파일을 먼저 받아 둔다(받기에 실패하면 지금 설치는 그대로 둔다)
@@ -131,13 +134,13 @@ $Body = @'
         Move-Item -LiteralPath $newUninstall -Destination $UninstallPath -Force
         Say "  설치 폴더: $InstallDir"
 
-        # 6. 시작프로그램에 등록(로그인할 때 node를 창 없이 띄운다). 경로에 한글이 있어도 되게 UTF-16으로 쓴다.
+        # 6. 시작프로그램에 등록(PC를 켜고 윈도에 로그인할 때 node를 창 없이 띄운다). 경로에 한글이 있어도 되게 UTF-16으로 쓴다.
         $vbs = @"
 ' claude-session-share: starts the session-share watcher at logon (written by install.ps1)
 CreateObject("WScript.Shell").Run """$NodeExe"" ""$ScriptPath""", 0, False
 "@
         [IO.File]::WriteAllText($VbsPath, $vbs, [Text.Encoding]::Unicode)
-        Say "  시작프로그램: $VbsPath"
+        Say "  자동 실행(PC를 켤 때): $VbsPath"
 
         # 7. 처음 설치면 모든 계정 폴더를 통째로 백업한 뒤 한 번 맞춘다
         if (-not $Updating) {
@@ -168,12 +171,14 @@ CreateObject("WScript.Shell").Run """$NodeExe"" ""$ScriptPath""", 0, False
         Write-Host $s.Out.TrimEnd()
         Say ''
         if ($Updating) {
-            Say '업데이트했습니다. 지켜보기가 새 스크립트로 다시 돌고 있습니다.' 'Green'
+            Say '업데이트했습니다. 자동 맞춤(지켜보기)이 새 스크립트로 다시 돌고 있습니다.' 'Green'
         } else {
-            Say '설치했습니다. Claude 데스크톱을 한 번 완전히 껐다 켜면(트레이 아이콘 > 종료 뒤 다시 실행) 모든 계정의 세션이 목록에 보입니다.' 'Green'
+            Say '설치했습니다. 위의 표는 계정 폴더 상태이고 에러가 아닙니다.' 'Green'
+            Say '이제 Claude를 완전히 껐다 켜세요. 창의 X는 숨기기일 뿐이니, 작업 표시줄 오른쪽 아래 ^ 안의 Claude 아이콘을 마우스 오른쪽 클릭해 종료(Quit)한 뒤 다시 실행합니다.' 'Green'
+            Say '그러면 이 PC에서 로그인한 적 있는 모든 계정의 세션이 Code 탭에 보입니다.' 'Green'
         }
-        Say "  상태 보기:  node `"$ScriptPath`" --status"
-        Say "  끄기:       irm $BaseUrl/uninstall.ps1 | iex"
+        Say "  상태 보기:      node `"$ScriptPath`" --status"
+        Say "  끄고 싶을 때:   irm $BaseUrl/uninstall.ps1 | iex"
     } catch {
         Write-Host ''
         Write-Host "설치하지 못했습니다: $($_.Exception.Message)" -ForegroundColor Red

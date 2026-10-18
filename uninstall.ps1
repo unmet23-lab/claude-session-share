@@ -26,8 +26,8 @@ $Body = @'
         $boxed = @(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'Packages') -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "LocalCache\Local\$probeName") } | Select-Object -First 1)
         Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
         if ($boxed.Count) {
-            Say "이 창은 $($boxed[0].Name) 앱 안에서 열린 터미널이라 AppData 파일이 그 앱 전용 폴더로 돌려져 보입니다." 'Yellow'
-            Say '시작 메뉴에서 PowerShell을 새로 열어 다시 실행하세요.' 'Yellow'
+            Say "이 창은 $($boxed[0].Name.Split('_')[0]) 같은 앱 안에서 연 터미널이라 여기서는 끄기가 제대로 되지 않습니다." 'Yellow'
+            Say '시작 단추 → powershell 입력 → Enter로 PowerShell을 따로 열어 같은 한 줄을 다시 붙여 넣으세요.' 'Yellow'
             return
         }
 
@@ -51,7 +51,8 @@ $Body = @'
         # 3. 설치 폴더는 물어보고 지운다(기본은 남김)
         if (Test-Path -LiteralPath $InstallDir) {
             $answer = ''
-            try { $answer = Read-Host "  설치 폴더도 지울까요? 백업이 들어 있습니다. [y/N]  $InstallDir" } catch { }
+            Say "  설치 폴더: $InstallDir  (백업이 들어 있습니다)"
+            try { $answer = Read-Host '  설치 폴더도 지울까요? 남기려면 그냥 Enter, 지우려면 y를 치고 Enter' } catch { }
             if ($answer -match '^\s*(y|yes|예|네|ㅇ)\s*$') {
                 if ((Get-Location).Path -like "$InstallDir*") { Set-Location $env:USERPROFILE }
                 Remove-Item -LiteralPath $InstallDir -Recurse -Force
