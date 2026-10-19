@@ -23,6 +23,7 @@ function setup(name) {
     USERPROFILE: path.join(root, "home"), HOME: path.join(root, "home"),
     LOCALAPPDATA: path.join(root, "local"), APPDATA: path.join(root, "roaming"),
     CLAUDE_SESSION_SHARE_HOME: path.join(root, "share"),
+    CLAUDE_SESSION_SHARE_NOTIFY_FILE: path.join(root, "notify.txt"), // 진짜 윈도 알림을 띄우지 않는다
   };
   for (const d of [env.USERPROFILE, path.join(env.LOCALAPPDATA, "Claude", "logs")]) fs.mkdirSync(d, { recursive: true });
   fs.writeFileSync(path.join(env.LOCALAPPDATA, "Claude", "logs", "main.log"), "");

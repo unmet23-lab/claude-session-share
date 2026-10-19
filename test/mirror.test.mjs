@@ -22,10 +22,12 @@ function setup(name) {
     USERPROFILE: path.join(root, "home"), HOME: path.join(root, "home"),
     LOCALAPPDATA: path.join(root, "local"), APPDATA: path.join(root, "roaming"),
     CLAUDE_SESSION_SHARE_HOME: path.join(root, "share"),
+    CLAUDE_SESSION_SHARE_NOTIFY_FILE: path.join(root, "notify.txt"), // 진짜 윈도 알림을 띄우지 않는다
   };
   delete env.CLAUDE_CONFIG_DIR;
   for (const d of [env.USERPROFILE, path.join(env.LOCALAPPDATA, "Claude", "logs")]) fs.mkdirSync(d, { recursive: true });
-  fs.writeFileSync(path.join(env.LOCALAPPDATA, "Claude", "logs", "main.log"), "");
+  const mainLog = path.join(env.LOCALAPPDATA, "Claude", "logs", "main.log");
+  fs.writeFileSync(mainLog, "");
   const tree = path.join(env.APPDATA, "Claude", "claude-code-sessions");
   const dir = (who) => path.join(tree, ACCT[who], ORG);
   for (const who of Object.keys(ACCT)) fs.mkdirSync(dir(who), { recursive: true });
@@ -38,6 +40,8 @@ function setup(name) {
       fs.utimesSync(p, when, when);
     },
     has: (who, name) => fs.existsSync(path.join(dir(who), name)),
+    log: (text) => fs.appendFileSync(mainLog, text),
+    notes: () => (fs.existsSync(env.CLAUDE_SESSION_SHARE_NOTIFY_FILE) ? fs.readFileSync(env.CLAUDE_SESSION_SHARE_NOTIFY_FILE, "utf8") : ""),
     run(mode = "--once") {
       const r = spawnSync(process.execPath, [SCRIPT, mode], { env, encoding: "utf8" });
       assert.equal(r.status, 0, r.stderr || r.stdout);
@@ -84,4 +88,91 @@ test("--status는 맞춰졌으면 판정 한 줄(○ N곳이 모두 같습니다
   const out = t.run("--status");
   assert.match(out, /○ 2곳이 모두 같습니다\(세션 1개\)/);
   assert.match(out, /Code 탭 세션\(claude-code-sessions\)/);
+});
+
+// 앱 기록(main.log) 줄. existing을 빼면 existingSessions가 없는 옛 앱 판의 줄이다.
+const initLine = (acct, existing) =>
+  `2026-10-19 08:50:58 [info] [LocalSessionManager] Initialization succeeded — accountId=${acct}, orgId=${ORG}${existing === undefined ? "" : `, existingSessions=${existing}`}\n`;
+const loadedLine = (acct, n, home = "C:\\Users\\me") =>
+  `2026-10-19 08:50:58 [info] Loaded ${n} persisted sessions from ${home}\\AppData\\Roaming\\Claude\\claude-code-sessions\\${acct}\\${ORG} (0 archived deferred)\n`;
+const noteLines = (t) => t.notes().split("\n").filter(Boolean);
+
+// 알림 시험은 먼저 한 번 돌려 상태 파일을 만든다(상태 파일 없이 처음 읽는 기록은 설치 직후의 지난 일이라 알리지 않는다).
+test("처음 쓰는 계정이 빈 목록을 읽으면 폴더를 채우고 「한 번만 껐다 켜」 알림을 한 번 보낸다", () => {
+  const t = setup("first-login");
+  t.put("A", "local_f1.json", { sessionId: "local_f1", cliSessionId: "55555555-5555-4555-8555-555555555555" });
+  t.run();
+  t.log(initLine(ACCT.B, 0) + loadedLine(ACCT.B, 0));
+  t.run();
+  assert.ok(t.has("B", "local_f1.json"), "처음 쓰는 계정 폴더를 채워야 한다");
+  assert.match(t.notes(), /한 번만 껐다 켜/);
+  assert.match(t.notes(), /이전 세션 1개/);
+  t.run();
+  assert.equal(noteLines(t).length, 1, "다시 돌려도 같은 일로 두 번 알리면 안 된다");
+});
+
+test("설치 직후 첫 맞추기는 지난 기록의 「Loaded 0」에 알리지 않지만 폴더는 채운다", () => {
+  const t = setup("history");
+  t.put("A", "local_h1.json", { sessionId: "local_h1", cliSessionId: "12121212-1212-4121-8121-121212121212" });
+  t.log(initLine(ACCT.B, 0) + loadedLine(ACCT.B, 0));
+  t.run();
+  assert.ok(t.has("B", "local_h1.json"));
+  assert.equal(t.notes(), "", "설치기가 이미 껐다 켜라고 하므로 지난 기록으로 알림을 띄우지 않는다");
+});
+
+test("이미 아는 계정으로 바꾸면(existingSessions=0 뒤 Loaded N) 알리지 않는다", () => {
+  const t = setup("known-switch");
+  t.put("A", "local_k1.json", { sessionId: "local_k1", cliSessionId: "13131313-1313-4131-8131-131313131313" });
+  t.run();
+  t.log(initLine(ACCT.B, 0) + loadedLine(ACCT.B, 1));
+  t.run();
+  assert.equal(t.notes(), "");
+});
+
+test("한 번에 두 계정 줄이 섞여 읽혀도 처음 쓰는 계정만 한 번 알린다", () => {
+  const t = setup("mixed");
+  t.put("A", "local_m1.json", { sessionId: "local_m1", cliSessionId: "14141414-1414-4141-8141-141414141414" });
+  t.run();
+  t.log(initLine(ACCT.A, 1) + loadedLine(ACCT.A, 0) + initLine(ACCT.B, 0) + loadedLine(ACCT.B, 0));
+  t.run();
+  assert.equal(noteLines(t).length, 1);
+  assert.match(t.notes(), /이전 세션 1개/);
+});
+
+test("사용자 이름에 공백이 있는 경로(C:\\Users\\Hong Gildong)의 기록도 알아본다", () => {
+  const t = setup("space-path");
+  t.put("A", "local_sp.json", { sessionId: "local_sp", cliSessionId: "15151515-1515-4151-8151-151515151515" });
+  t.run();
+  t.log(initLine(ACCT.B, 0) + loadedLine(ACCT.B, 0, "C:\\Users\\Hong Gildong"));
+  t.run();
+  assert.match(t.notes(), /한 번만 껐다 켜/);
+});
+
+test("같은 계정으로 다시 로그인했을 때(existingSessions>0 뒤 Loaded 0)는 알리지 않는다", () => {
+  const t = setup("same-user");
+  t.put("A", "local_r1.json", { sessionId: "local_r1", cliSessionId: "66666666-6666-4666-8666-666666666666" });
+  t.run();
+  t.log(initLine(ACCT.A, 1) + loadedLine(ACCT.A, 0));
+  t.run();
+  assert.equal(t.notes(), "", "목록이 이미 보이는데 껐다 켜라고 하면 안 된다");
+});
+
+test("로그인 줄과 「Loaded 0」 줄이 다른 바퀴에 읽혀도 같은 계정 재로그인은 알리지 않는다", () => {
+  const t = setup("split-read");
+  t.put("A", "local_p1.json", { sessionId: "local_p1", cliSessionId: "77777777-7777-4777-8777-777777777777" });
+  t.log(initLine(ACCT.A, 1));
+  t.run();
+  t.log(loadedLine(ACCT.A, 0));
+  t.run();
+  assert.equal(t.notes(), "");
+});
+
+test("existingSessions가 없는 옛 앱 기록에서도 빈 목록이면 채우고 알린다", () => {
+  const t = setup("old-log");
+  t.put("A", "local_o1.json", { sessionId: "local_o1", cliSessionId: "88888888-8888-4888-8888-888888888888" });
+  t.run();
+  t.log(initLine(ACCT.B) + loadedLine(ACCT.B, 0));
+  t.run();
+  assert.ok(t.has("B", "local_o1.json"));
+  assert.match(t.notes(), /한 번만 껐다 켜/);
 });

@@ -50,7 +50,9 @@ irm https://raw.githubusercontent.com/unmet23-lab/claude-session-share/main/inst
 
 이제 **이 PC에서 로그인한 적 있는** 모든 계정의 세션이 Code 탭에 보입니다. 한도가 차면 다른 계정으로 로그인하세요. 하던 세션이 목록에 그대로 있고, 눌러서 이어 갈 수 있습니다.
 
-**알림이 뜨면:** 이 PC에서 처음 로그인하는 계정이면 화면 오른쪽 아래에 「**Windows PowerShell**」 이름으로 「이 계정 폴더에 이전 세션 N개를 채웠어요…」 알림이 뜹니다. 이 도구가 보낸 알림입니다. 그때 한 번만 더 완전히 껐다 켜면 됩니다. 알림을 못 봤어도 껐다 켜면 됩니다. 전에 로그인한 적 있는 계정은 바로 보입니다.
+> **이 PC에서 처음 쓰는 계정은 한 번 더 껐다 켜야 보입니다.** 그 계정으로 처음 로그인하면 앱이 빈 목록부터 읽기 때문입니다. 도구가 1~2초 안에 세션을 채우고, 화면 오른쪽 아래에 「**Windows PowerShell**」 이름으로 「Claude 세션 공유 · 한 번만 껐다 켜 주세요」 알림을 띄웁니다. 그때 위와 같이 한 번만 완전히 껐다 켜면 됩니다(알림을 못 봤어도 같습니다). 그 계정은 다음부터 바꾸자마자 바로 보입니다.
+
+**한도가 찼을 때 껐다 켜지 않으려면:** 설치한 날, 번갈아 쓸 계정마다 한 번씩 로그인했다가 원래 계정으로 돌아오세요. 그 계정에서 바로 일할 게 아니면 알림이 떠도 껐다 켤 필요는 없습니다. 이렇게 해 두면 나중에 한도가 차서 바꿀 때는 목록이 바로 보입니다.
 
 ## 잘 됐는지 확인
 
@@ -85,7 +87,9 @@ Cowork 세션(local-agent-mode-sessions): 0곳, 맞춘 파일 0개
 | 노란 「Node.js가 없습니다」 | 1번대로 Node.js를 설치하고, **PowerShell 창을 새로 연 뒤** 한 줄을 다시 붙여 넣습니다. |
 | 노란 「이 창은 … 같은 앱 안에서 연 터미널이라…」 | Claude 앱 안의 터미널이거나 Claude에게 시킨 경우입니다. 시작 단추 → `powershell` 입력 → Enter로 창을 따로 열어 다시 붙여 넣습니다. |
 | 노란 「아직 Code 탭을 쓴 적이 없는 것 같습니다」 | 그대로 두면 됩니다. Code 탭을 쓰기 시작하면 자동으로 맞춥니다. |
+| 다른 계정으로 바꿨더니 목록이 비어 있음 | 그 계정을 이 PC에서 처음 쓰는 경우가 대부분입니다. 알림이 떴든 안 떴든 3번대로 한 번만 완전히 껐다 켜면 보이고, 다음부터는 바꾸자마자 보입니다. 그래도 비어 있으면 위 「잘 됐는지 확인」에서 지켜보기가 실행 중인지 봅니다. |
 | 껐다 켰는데 목록이 그대로 비어 있음 | 창의 X로 닫은 경우가 대부분입니다. 3번대로 `^` 안의 Claude 아이콘에서 「종료」를 누릅니다. 그래도 안 보이면 위 「잘 됐는지 확인」을 봅니다. |
+| 처음 쓰는 계정으로 바꿨는데 알림이 안 뜸 | 2026년 10월 19일 이전 판은 알림이 뜨지 않았습니다. 설치 한 줄을 다시 붙여 넣으면 고친 판으로 바뀝니다. 그래도 안 뜨면 Windows 설정 > 시스템 > 알림에서 「Windows PowerShell」이 켜져 있는지 봅니다(방해 금지 중에는 알림 센터에만 쌓입니다). 알림이 없어도 껐다 켜면 목록은 보입니다. |
 | `install.ps1`을 내려받아 더블클릭했더니 메모장이 열림 | 파일은 필요 없습니다. 2번의 한 줄만 붙여 넣습니다. |
 | 빨간 「설치하지 못했습니다:」 | 그 줄을 복사해 [이슈](https://github.com/unmet23-lab/claude-session-share/issues)로 남겨 주세요. |
 
@@ -139,6 +143,7 @@ powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\claude-session-share
 - 앱이 잠깐 쓰고 지우는 임시 파일(`*.tmp`)은 옮기지 않습니다.
 - 예약 작업 목록(`scheduled-tasks.json`)은 파일째 맞추지 않고 작업마다 합칩니다. 아래 「예약 작업」을 보세요.
 - Cowork 세션 폴더(`local-agent-mode-sessions`)도 같은 방식으로 맞춥니다.
+- 앱은 폴더를 지켜보지 않고 로그인할 때만 목록을 읽습니다. 그래서 앱 기록(`main.log`)에 「Loaded 0 persisted sessions」가 남고 그 직전 로그인 줄의 `existingSessions`도 0이면(처음 쓰는 계정), 그 폴더를 채운 뒤 「한 번만 껐다 켜 주세요」 알림을 띄웁니다. 같은 계정으로 다시 로그인한 경우(`existingSessions`가 0보다 큼)는 목록이 이미 보이므로 알리지 않습니다. 설치 직후 첫 맞추기 때 읽는 지난 기록에도 알리지 않습니다(설치기가 따로 「껐다 켜세요」를 알려 줍니다).
 
 ### 예약 작업
 
@@ -214,7 +219,7 @@ Copy-Item "<백업 폴더>\scheduled-tasks.json" $f
 node --test
 ```
 
-가짜 앱 데이터 폴더를 만들어 돌리므로 실제 앱 데이터는 건드리지 않습니다. Claude 앱 안의 터미널이 아니라 보통 PowerShell에서 실행합니다.
+가짜 앱 데이터 폴더를 만들어 돌리므로 실제 앱 데이터는 건드리지 않습니다. 윈도 알림도 띄우지 않고 환경 변수 `CLAUDE_SESSION_SHARE_NOTIFY_FILE`로 정한 파일에 적습니다. Claude 앱 안의 터미널이 아니라 보통 PowerShell에서 실행합니다.
 
 </details>
 
@@ -256,7 +261,8 @@ The status ends with a line like 「○ 3곳이 모두 같습니다」 ("all 3 f
 - The first install backs up every account folder. While running, it backs up the fullest folder every hour and keeps the last 24.
 - The archive index is not merged; the newest copy wins everywhere.
 - The scheduled task list (`scheduled-tasks.json`) is merged task by task instead. The app rewrites this list on every sign-in and writes an empty one for a new account, which would otherwise wipe every account's tasks. A task counts as deleted only when one task the app actually knew in that account (read at sign-in or created there) disappears. An empty list from a new account, tasks the app has not loaded yet, and several tasks vanishing at once are restored instead. If tasks are restored into the account you are using, restart Claude so it runs them again.
-- The first time you sign in with a new account, the app reads an empty list. The tool fills the folder at once and shows a Windows notification (sent as "Windows PowerShell"). Restart Claude once and the sessions appear.
+- The first time you sign in with an account on this PC, the app reads an empty list. The tool fills the folder at once and shows a Windows notification (sent as "Windows PowerShell"). Restart Claude once and the sessions appear; that account shows them right away from then on. To avoid this restart when you hit a limit, sign in once with each account you plan to rotate right after installing, then switch back.
+- Signing back in to the same account does not trigger the notification. Versions before 2026-10-19 never actually showed these notifications (the PowerShell process was started detached, without a console); run the install line again to update.
 - macOS and Linux are not supported.
 - Messages from the installer and the script are in Korean.
 

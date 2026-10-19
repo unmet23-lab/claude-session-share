@@ -12,6 +12,7 @@
 //   - 예약 작업 목록(scheduled-tasks.json)만은 파일째 맞추지 않고 작업(id)마다 합친다. 앱은 로그인할 때마다 목록을 다시 쓰고
 //     처음 보는 짝엔 빈 목록을 써서, 「최근 것이 이김」이면 그 빈 목록이 모든 계정의 예약을 지운다(아래 「예약 작업 목록」).
 //   - 앱이 처음 보는 짝으로 로그인하면(main.log 「Loaded 0 persisted sessions from …」) 그 폴더를 바로 채우고 윈도 알림으로 「껐다 켜기」를 알린다.
+//     같은 계정으로 다시 로그인할 때도 「Loaded 0」이 남지만(직전 줄 existingSessions=N, 이미 메모리에 있어 새로 읽은 게 없다는 뜻) 그때는 알리지 않는다.
 //   - 대화 원문(~/.claude/projects)은 계정과 상관없이 하나라 손대지 않는다.
 //   - --once --backup은 맞추기 전에 모든 짝 폴더를 통째로 백업한다. 지켜보는 동안엔 가장 기록이 많은 폴더를 매시간 백업한다(최근 24개).
 // 상태·기록·pid·백업은 %LOCALAPPDATA%\claude-session-share\ 에 둔다(환경 변수 CLAUDE_SESSION_SHARE_HOME으로 바꿀 수 있다).
@@ -44,8 +45,10 @@ const STATE_WRITE_DEBOUNCE_MS = 2000;
 const LOG_FIRST_READ_MAX = 8 * 1024 * 1024;
 const LOG_FILE_MAX = 512 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const INIT_LINE = /\[LocalSessionManager\] Initialization succeeded — accountId=([0-9a-f-]{36}), orgId=([0-9a-f-]{36})/g;
-const LOADED_LINE = /Loaded (\d+) persisted sessions from (\S+?)[\\/]([0-9a-f-]{36})[\\/]([0-9a-f-]{36})(?=\s|$)/g;
+// existingSessions는 로그인 때 앱 메모리에 이미 있던 세션 수다(같은 계정 재로그인이면 0보다 크다). 옛 앱 판에는 없을 수 있다.
+const INIT_LINE = /\[LocalSessionManager\] Initialization succeeded — accountId=([0-9a-f-]{36}), orgId=([0-9a-f-]{36})(?:, existingSessions=(\d+))?/g;
+// 경로에 공백이 있어도 되게(C:\Users\Hong Gildong\…) 「.+?」로 줄 안에서만 찾는다. 「.」은 줄을 넘지 않는다.
+const LOADED_LINE = /Loaded (\d+) persisted sessions from (.+?)[\\/]([0-9a-f-]{36})[\\/]([0-9a-f-]{36})(?=\s|$)/g;
 const LOGOUT_LINE = /\[LocalSessionManager\] Account logged out/g;
 // 앱이 쓰다 만 임시 파일(.tmp-<pid>-<uuid>, 이름.tmp-숫자10자리hex6자리, 이름.json.tmp)과 우리 임시 파일(.mirror-…)은 건너뛴다.
 // 이름.json.tmp는 앱이 쓰고 곧바로 이름을 바꾸는 파일이라, 옮기려 하면 「복사 실패: ENOENT」만 남는다(2026-10-18 기록 202줄).
@@ -85,18 +88,32 @@ function log(msg) {
 
 /* ---------- 윈도 알림 ---------- */
 // 발신자는 Windows PowerShell이다. 아래 {1AC14E77-…} GUID는 Windows 시스템 폴더(FOLDERID_System)를 뜻하는 고정값이다(계정 ID 아님).
+// 굵은 제목 + 본문 한두 줄. 본문이 잘리지 않고 감기게 ToastGeneric으로 그린다(제목 2줄·본문 합쳐 4줄까지).
+// 줄 수만큼 글자 칸이 있는 옛 틀(ToastText02·ToastText04)로 XML을 받은 뒤 틀 이름만 ToastGeneric으로 바꾼다.
+// CLAUDE_SESSION_SHARE_NOTIFY_FILE이 있으면 알림 대신 그 파일에 적는다(시험용).
 const psq = (s) => "'" + String(s).replace(/'/g, "''") + "'";
-function notify(title, body) {
+const PS_EXE = path.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+function notify(title, ...lines) {
+  if (process.env.CLAUDE_SESSION_SHARE_NOTIFY_FILE) {
+    try { fs.appendFileSync(process.env.CLAUDE_SESSION_SHARE_NOTIFY_FILE, [title, ...lines].join(" | ") + "\n"); } catch {}
+    return;
+  }
+  const texts = [title, ...lines.slice(0, 2)].map((s, i) => `$null = $t.Item(${i}).AppendChild($x.CreateTextNode(${psq(s)}))`).join("\n");
   const ps = `[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
-$x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::${lines.length > 1 ? "ToastText04" : "ToastText02"})
+$x.GetElementsByTagName('binding').Item(0).SetAttribute('template', 'ToastGeneric')
 $t = $x.GetElementsByTagName('text')
-$null = $t.Item(0).AppendChild($x.CreateTextNode(${psq(title)}))
-$null = $t.Item(1).AppendChild($x.CreateTextNode(${psq(body)}))
+${texts}
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))`;
+  // detached로 띄우면 Windows가 콘솔을 주지 않아 PowerShell이 한 줄도 돌지 않고 끝난다(2026-10-19 확인, 그전 판은 알림이 뜨지 않았다).
+  // 그래서 떼지 않고 숨김으로 띄운다. 떼지 않은 자식은 node가 끝나면 함께 끝나므로 unref하지 않는다(--once도 알림이 끝날 때까지 기다린다).
+  // 혹시 멈춰도 --once·설치기가 붙잡히지 않게 30초에서 끊는다.
   try {
-    spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", Buffer.from(ps, "utf16le").toString("base64")],
-      { windowsHide: true, detached: true, stdio: "ignore" }).unref();
-  } catch {}
+    const child = spawn(PS_EXE, ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", Buffer.from(ps, "utf16le").toString("base64")],
+      { windowsHide: true, stdio: "ignore", timeout: 30000 });
+    child.on("error", (e) => log(`알림을 띄우지 못함: ${e.message}`));
+    child.on("exit", (code, signal) => { if (code || signal) log(`알림 PowerShell이 ${signal || `종료 코드 ${code}`}로 끝남`); });
+  } catch (e) { log(`알림을 띄우지 못함: ${e.message}`); }
 }
 
 /* ---------- 앱 위치 ---------- */
@@ -157,13 +174,15 @@ function readLogEvents(state, logPath) {
   const text = buf.subarray(0, lastNl).toString("utf8");
   // 시간 순서를 지키려고 세 가지를 위치와 함께 모은다.
   const ev = [];
-  for (const m of text.matchAll(INIT_LINE)) ev.push({ at: m.index, type: "init", key: pairKey(m[1], m[2]) });
+  for (const m of text.matchAll(INIT_LINE)) ev.push({ at: m.index, type: "init", key: pairKey(m[1], m[2]), existing: m[3] === undefined ? null : Number(m[3]) });
   for (const m of text.matchAll(LOADED_LINE)) if (UUID.test(m[3]) && UUID.test(m[4])) ev.push({ at: m.index, type: "loaded", n: Number(m[1]), tree: path.basename(m[2]), key: pairKey(m[3], m[4]) });
   for (const m of text.matchAll(LOGOUT_LINE)) ev.push({ at: m.index, type: "logout" });
   ev.sort((a, b) => a.at - b.at);
+  // 「Loaded N」 줄에는 그 짝의 바로 앞 로그인 줄의 existingSessions를 붙인다. 두 줄이 다른 바퀴에 읽혀도 되게 상태에 둔다.
+  const existing = (state.existing ||= {});
   for (const e of ev) {
-    if (e.type === "init") { out.inits.push(e.key); out.logout = false; }
-    else if (e.type === "loaded") out.loaded.push(e);
+    if (e.type === "init") { out.inits.push(e.key); out.logout = false; existing[e.key] = e.existing; }
+    else if (e.type === "loaded") out.loaded.push({ ...e, existing: existing[e.key] ?? null });
     else out.logout = true;
   }
   return out;
@@ -560,6 +579,9 @@ function snapshotAll(tag) {
 function tick(ctx, opts = {}) {
   const { state } = ctx;
   const ev = readLogEvents(state, findMainLog());
+  // 상태 파일 없이 처음 읽은 기록(설치 직후 첫 맞추기)은 지난 일이라 알리지 않는다. 설치기가 따로 「껐다 켜세요」를 알려 준다.
+  const history = ctx.freshState && !ctx.logReadOnce;
+  ctx.logReadOnce = true;
   const seen = (key) => { if (!state.known[key]) { state.known[key] = new Date().toISOString(); ctx.stateDirty = true; return true; } return false; };
   let newPair = false;
   for (const key of ev.inits) { if (seen(key)) newPair = true; state.active = key; }
@@ -570,8 +592,11 @@ function tick(ctx, opts = {}) {
   }
   if (newPair || !ctx.family || Date.now() - (ctx.lastFamilyScan || 0) >= CONFIG_SCAN_MS) { ctx.lastFamilyScan = Date.now(); refreshFamily(ctx); }
   if (!ctx.family) return;
-  // 앱이 어떤 짝 폴더에서 세션을 0개 읽었는데 다른 폴더엔 기록이 있으면, 채운 뒤 「껐다 켜기」를 알린다.
-  const emptyLoads = ev.loaded.filter((e) => e.n === 0 && e.tree === "claude-code-sessions");
+  // 앱이 어떤 짝 폴더에서 세션을 0개 읽었고 메모리에도 없었는데(existingSessions=0) 다른 폴더엔 기록이 있으면, 채운 뒤 「껐다 켜기」를 알린다.
+  // 같은 계정 재로그인(existingSessions>0 뒤 「Loaded 0」)은 목록이 이미 보이는 상태라 빈 목록으로 치지 않는다.
+  const codeLoads = ev.loaded.filter((e) => e.n === 0 && e.tree === "claude-code-sessions");
+  for (const e of codeLoads) if (e.existing > 0) log(`${short(e.key)}: 같은 계정으로 다시 로그인함(목록에 이미 ${e.existing}개) — 알림 없음`);
+  const emptyLoads = codeLoads.filter((e) => !(e.existing > 0));
   const full = opts.full || Date.now() - (ctx.lastFull || 0) >= FULL_SCAN_MS || newPair || emptyLoads.length > 0;
   if (full) ctx.lastFull = Date.now();
   for (const tree of TREES) {
@@ -588,7 +613,10 @@ function tick(ctx, opts = {}) {
     }
   }
   // 알림은 한 바퀴에 한 번만 띄운다(처음 설치할 때 지난 기록을 한꺼번에 읽어도 알림이 쏟아지지 않게).
-  if (filled) notify("Claude 세션 공유", `이 계정 폴더에 이전 세션 ${filled}개를 채웠어요. Claude를 한 번 껐다 켜면 세션 목록이 보여요.`);
+  if (filled && history) log(`처음 읽은 지난 기록이라 알림은 띄우지 않음(세션 ${filled}개 채움)`);
+  if (filled && !history) notify("Claude 세션 공유 · 한 번만 껐다 켜 주세요",
+    `이 PC에서 처음 쓰는 계정이라 목록이 비어 보였어요. 이전 세션 ${filled}개를 채웠어요.`,
+    "작업 표시줄 ^ 안 Claude 아이콘 → 오른쪽 클릭 → 종료 → 다시 실행");
   if (Date.now() - (ctx.lastSnapshot || 0) >= SNAPSHOT_MS) {
     ctx.lastSnapshot = Date.now();
     try { snapshot(ctx); } catch (e) { log(`백업 실패: ${e.message}`); }
@@ -628,11 +656,12 @@ function loadState() {
   // v1(junction 판) 상태에서 이어받을 것: 로그 위치·알려진 짝·지금 계정. home은 더 쓰지 않는다.
   const union = s.v === 2 ? s.union || {} : {};
   for (const tree of TREES) if (union[tree]) delete union[tree][REGISTRY]; // 예약 목록은 파일 미러에서 뺐다
-  return { v: 2, logPath: s.logPath, logOffset: s.logOffset || 0, known: s.known || {}, active: s.active || null, union, synced: s.v === 2 ? s.synced || {} : {}, tasks: s.v === 2 ? s.tasks || {} : {} };
+  return { v: 2, logPath: s.logPath, logOffset: s.logOffset || 0, known: s.known || {}, active: s.active || null, union, synced: s.v === 2 ? s.synced || {} : {}, tasks: s.v === 2 ? s.tasks || {} : {}, existing: s.v === 2 ? s.existing || {} : {} };
 }
 
 function makeCtx(daemon) {
-  return { state: loadState(), daemon, manifests: {}, dirty: new Set(), fullScanned: {}, watchers: {}, family: null, stateDirty: false };
+  // freshState: 상태 파일이 아직 없음(처음 설치). 이때 처음 읽는 앱 기록은 지난 일이다.
+  return { state: loadState(), daemon, freshState: !fs.existsSync(STATE_PATH), manifests: {}, dirty: new Set(), fullScanned: {}, watchers: {}, family: null, stateDirty: false };
 }
 
 function runningPid() {
