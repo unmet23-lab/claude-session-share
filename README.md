@@ -90,6 +90,7 @@ Cowork 세션(local-agent-mode-sessions): 0곳, 맞춘 파일 0개
 | 다른 계정으로 바꿨더니 목록이 비어 있음 | 그 계정을 이 PC에서 처음 쓰는 경우가 대부분입니다. 알림이 떴든 안 떴든 3번대로 한 번만 완전히 껐다 켜면 보이고, 다음부터는 바꾸자마자 보입니다. 그래도 비어 있으면 위 「잘 됐는지 확인」에서 지켜보기가 실행 중인지 봅니다. |
 | 껐다 켰는데 목록이 그대로 비어 있음 | 창의 X로 닫은 경우가 대부분입니다. 3번대로 `^` 안의 Claude 아이콘에서 「종료」를 누릅니다. 그래도 안 보이면 위 「잘 됐는지 확인」을 봅니다. |
 | 처음 쓰는 계정으로 바꿨는데 알림이 안 뜸 | 2026년 10월 19일 이전 판은 알림이 뜨지 않았습니다. 설치 한 줄을 다시 붙여 넣으면 고친 판으로 바뀝니다. 그래도 안 뜨면 Windows 설정 > 시스템 > 알림에서 「Windows PowerShell」이 켜져 있는지 봅니다(방해 금지 중에는 알림 센터에만 쌓입니다). 알림이 없어도 껐다 켜면 목록은 보입니다. |
+| 갑자기 계정을 바꿔도 목록이 맞춰지지 않음, 상태 보기에 「앱 데이터: (못 찾음…)」·「0곳」 | 앱(스토어판)이 데이터를 `%LOCALAPPDATA%\Claude-Data\…`로 옮긴 경우입니다(2026년 10월 19일부터 보임). 그 전 판은 이 자리를 몰라 그때부터 맞추지 못합니다. 2번의 한 줄을 다시 붙여 넣어 새 판으로 바꾸고 3번대로 한 번 껐다 켭니다. |
 | `install.ps1`을 내려받아 더블클릭했더니 메모장이 열림 | 파일은 필요 없습니다. 2번의 한 줄만 붙여 넣습니다. |
 | 빨간 「설치하지 못했습니다:」 | 그 줄을 복사해 [이슈](https://github.com/unmet23-lab/claude-session-share/issues)로 남겨 주세요. |
 
@@ -177,6 +178,7 @@ powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\claude-session-share
 | 스크립트·상태·기록·백업 | `%LOCALAPPDATA%\claude-session-share\` (탐색기 주소창에 붙여 넣으면 열립니다) |
 | 자동 실행 | 시작프로그램 폴더(`shell:startup`)의 `claude-session-share.vbs` |
 | 앱 세션 목록, Microsoft Store판 | `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code-sessions\` |
+| 앱 세션 목록, Microsoft Store판(앱이 데이터를 패키지 밖으로 옮긴 뒤) | `%LOCALAPPDATA%\Claude-Data\claude_pzs8sxrjxfjjc\claude-code-sessions\` — 옛 자리엔 `.user-data-left.*` 표식만 남습니다. 앱이 계정마다 켜고 끄는 설정이라 다시 패키지 안으로 돌아갈 수도 있고, 이 도구는 세션 폴더가 있는 쪽을 따라갑니다 |
 | 앱 세션 목록, 홈페이지판 | `%APPDATA%\Claude\claude-code-sessions\` |
 | 앱 기록 | `%LOCALAPPDATA%\Claude\logs\main.log` |
 
@@ -257,12 +259,13 @@ The status ends with a line like 「○ 3곳이 모두 같습니다」 ("all 3 f
 **Notes.**
 
 - This is an unofficial tool and is not affiliated with Anthropic.
-- It was tested only with Claude desktop 2.42304.0 from the Microsoft Store on Windows 11.
+- It was tested only with Claude desktop 2.42304.0–2.42304.2 from the Microsoft Store on Windows 11.
 - The first install backs up every account folder. While running, it backs up the fullest folder every hour and keeps the last 24.
 - The archive index is not merged; the newest copy wins everywhere.
 - The scheduled task list (`scheduled-tasks.json`) is merged task by task instead. The app rewrites this list on every sign-in and writes an empty one for a new account, which would otherwise wipe every account's tasks. A task counts as deleted only when one task the app actually knew in that account (read at sign-in or created there) disappears. An empty list from a new account, tasks the app has not loaded yet, and several tasks vanishing at once are restored instead. If tasks are restored into the account you are using, restart Claude so it runs them again.
 - The first time you sign in with an account on this PC, the app reads an empty list. The tool fills the folder at once and shows a Windows notification (sent as "Windows PowerShell"). Restart Claude once and the sessions appear; that account shows them right away from then on. To avoid this restart when you hit a limit, sign in once with each account you plan to rotate right after installing, then switch back.
 - Signing back in to the same account does not trigger the notification. Versions before 2026-10-19 never actually showed these notifications (the PowerShell process was started detached, without a console); run the install line again to update.
+- Since 2026-10-19 the Store app may move its whole data folder out of the package to `%LOCALAPPDATA%\Claude-Data\claude_<id>` (only a `.user-data-left.*` marker stays behind), and because the app turns this on and off per account it can move back. The tool follows whichever place holds the session folders, never recreates a place the app has left, and never reads a vanished account folder as "everything deleted". Earlier versions lost track after such a move and stopped syncing (`--status` showed no app data); run the install line again to update.
 - macOS and Linux are not supported.
 - Messages from the installer and the script are in Korean.
 

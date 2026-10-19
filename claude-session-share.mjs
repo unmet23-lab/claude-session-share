@@ -118,20 +118,34 @@ ${texts}
 
 /* ---------- 앱 위치 ---------- */
 // 앱 데이터 뿌리. MSIX 설치는 %LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude, 아니면 %APPDATA%\Claude.
+// 2026-10-19부터 스토어 앱이 데이터를 패키지 밖 %LOCALAPPDATA%\Claude-Data\<패키지 이름 소문자>로 통째로 옮긴다
+// (main.log 「[user-data-move] moved」, 옛 자리엔 .user-data-left.<이름> 표식만 남는다). 계정마다 켜고 끄는 설정이라
+// 다시 패키지 안으로 돌아갈 수도 있다. 세션 폴더는 한 번에 한 곳에만 있으니 세션 폴더가 있는 쪽을 뿌리로 센다.
+// 두 곳에 다 있으면 떠났다는 표식이 있는 패키지 안 사본은 앱이 쓰지 않는 것이라 뺀다(채워서 「두 곳 다 있음」을 만들지 않게).
+const familyOf = (d) => {
+  const parts = path.resolve(d).split(path.sep);
+  const i = parts.findIndex((p) => /^Claude_/i.test(p));
+  return i < 0 ? null : parts[i].toLowerCase();
+};
+const leftMarker = (d) => safeReaddir(d).some((n) => /^\.user-data-left\./i.test(n));
 function findRoots() {
   const cands = [];
   const pk = path.join(LOCAL, "Packages");
   for (const name of safeReaddir(pk)) if (/^Claude_/i.test(name)) cands.push(path.join(pk, name, "LocalCache", "Roaming", "Claude"));
+  const outside = path.join(LOCAL, "Claude-Data");
+  for (const name of safeReaddir(outside)) if (/^Claude_/i.test(name)) cands.push(path.join(outside, name));
   cands.push(path.join(ROAMING, "Claude"));
   // 스토어 앱 안의 터미널에서 실행되면 %APPDATA%\Claude가 패키지 폴더로 돌려져 같은 폴더가 두 번 보인다. 실제 위치로 한 번만 센다.
   const seen = new Set();
-  return cands.filter((d) => TREES.some((t) => kind(path.join(d, t)) === "dir")).filter((d) => {
+  const found = cands.filter((d) => TREES.some((t) => kind(path.join(d, t)) === "dir")).filter((d) => {
     let real = d;
     try { real = fs.realpathSync.native(d); } catch {}
     if (seen.has(lower(real))) return false;
     seen.add(lower(real));
     return true;
   });
+  const moved = new Set(found.filter((d) => lower(path.dirname(d)) === lower(outside)).map(familyOf));
+  return found.filter((d) => !(lower(path.dirname(d)) !== lower(outside) && moved.has(familyOf(d)) && leftMarker(d)));
 }
 
 // Claude·Codex 같은 스토어 앱 안의 터미널에서 실행되면 AppData 쓰기가 그 앱 전용 폴더(Packages\<앱>\LocalCache)로 돌려진다.
@@ -238,7 +252,10 @@ function scanDir(dir, prev) {
 }
 
 // 같은 내용을 원본과 같은 mtime으로 복사한다(임시 파일에 쓴 뒤 이름 바꾸기).
-function copyFile(src, dst, st) {
+// pair: 받는 짝 폴더. 그 안의 하위 폴더(backlog\ 등)만 만들고 짝 폴더 자체는 만들지 않는다 — 앱이 데이터를 통째로 다른 자리로
+// 옮긴 직후 옛 경로에 쓰면 옛 자리에 세션 폴더가 되살아나 「두 곳 다 있음」이 된다(2026-10-19 Claude-Data 옮김).
+function copyFile(src, dst, st, pair) {
+  if (pair && kind(pair) !== "dir") throw Object.assign(new Error("받는 짝 폴더가 없어짐(앱이 데이터를 옮겼을 수 있음)"), { code: "ENOENT" });
   fs.mkdirSync(path.dirname(dst), { recursive: true });
   const tmp = path.join(path.dirname(dst), `.mirror-${process.pid}-${crypto.randomBytes(4).toString("hex")}`);
   try {
@@ -260,11 +277,19 @@ const newer = (a, b) => !b || a.m > b.m || (a.m === b.m && a.s !== b.s);
 // state.synced[tree]: [dir…]                        지난번에 union과 같게 맞춰 둔 폴더(재시작 뒤 이 폴더에서 없어진 파일은 삭제로 본다)
 function syncTree(ctx, tree, opts = {}) {
   const { state } = ctx;
-  const dirs = ctx.family[tree] || [];
+  const manifests = (ctx.manifests[tree] ||= new Map());
+  // 짝 폴더가 통째로 없어졌으면(앱이 데이터를 다른 자리로 옮김) 「안의 파일을 다 지웠다」로 읽지 않는다 — 비어 있는 것과 없는 것은 다르다.
+  // 그렇게 읽으면 그 폴더에 있던 기록을 다른 계정 폴더에서도 지운다. 없는 폴더는 빼고 다음 바퀴에 뿌리를 다시 찾는다.
+  const all = ctx.family[tree] || [];
+  const dirs = all.filter((d) => kind(d) === "dir");
+  if (dirs.length < all.length) {
+    ctx.rootsMoved = true;
+    for (const d of all) if (!dirs.includes(d)) { manifests.delete(d); ctx.dirty.delete(lower(d)); }
+    log(`${tree}: 짝 폴더 ${all.length - dirs.length}곳이 없어짐 — 지운 것으로 치지 않고 앱 데이터 자리를 다시 찾음`);
+  }
   if (dirs.length === 0) return { copied: 0, removed: 0 };
   const union = (state.union[tree] ||= {});
   const syncedBefore = new Set((state.synced[tree] || []).map(lower));
-  const manifests = (ctx.manifests[tree] ||= new Map());
   const dirtyAll = opts.full || !ctx.fullScanned[tree];
   const toScan = dirs.filter((d) => dirtyAll || ctx.dirty.has(lower(d)));
   if (toScan.length === 0) return { copied: 0, removed: 0 };
@@ -319,8 +344,8 @@ function syncTree(ctx, tree, opts = {}) {
       if (d === u.src) continue;
       const cur = (scans.get(d) || manifests.get(d))?.get(rel) || (scans.has(d) || manifests.has(d) ? null : union[rel]);
       if (!newer(u, cur)) continue;
-      try { copyFile(src, path.join(d, rel), u); copied++; }
-      catch (e) { failed++; ctx.dirty.add(lower(u.src)); log(`${path.basename(path.dirname(d))}/${short(path.basename(d))} ← ${rel} 복사 실패: ${e.code || ""} ${e.message}`); continue; }
+      try { copyFile(src, path.join(d, rel), u, d); copied++; }
+      catch (e) { failed++; ctx.dirty.add(lower(u.src)); if (kind(d) !== "dir") ctx.rootsMoved = true; log(`${path.basename(path.dirname(d))}/${short(path.basename(d))} ← ${rel} 복사 실패: ${e.code || ""} ${e.message}`); continue; }
       (scans.get(d) || manifests.get(d))?.set(rel, { m: u.m, s: u.s });
       ctx.dirMtimes?.set(lower(d), mtime(d)); // 우리가 쓴 것 때문에 폴더 mtime 감시가 다시 훑지 않게
     }
@@ -489,6 +514,8 @@ function ensureRealDir(p) {
     fs.rmdirSync(p);
     log(`${path.basename(path.dirname(p)).slice(0, 8)}/${path.basename(p).slice(0, 8)} 연결(→ ${target})을 걷어내고 실제 폴더로 바꿈`);
   }
+  // 트리 폴더(…\claude-code-sessions)가 없으면 만들지 않는다 — 앱이 데이터를 막 다른 자리로 옮긴 참이면 옛 자리를 되살리게 된다.
+  if (kind(path.dirname(path.dirname(p))) !== "dir") return false;
   fs.mkdirSync(p, { recursive: true });
   return true;
 }
@@ -512,7 +539,21 @@ function refreshFamily(ctx) {
     for (const r of roots) for (const key of pairsFromDirs(path.join(r, tree))) { keys.add(key); dirs.push(path.join(r, tree, ...key.split("/"))); }
     for (const key of Object.keys(state.known)) if (!keys.has(key) && kind(path.join(primary, tree)) === "dir") dirs.push(path.join(primary, tree, ...key.split("/")));
     const ok = [];
-    for (const d of dirs) { try { if (ensureRealDir(d)) ok.push(d); } catch (e) { log(`${d} 준비 실패: ${e.code || ""} ${e.message}`); } }
+    for (const d of dirs) {
+      try {
+        const existed = kind(d) === "dir";
+        if (!ensureRealDir(d)) continue;
+        ok.push(d);
+        // 새로 만든(다시 만든) 빈 폴더는 「지난번에 맞춘 폴더」로 치지 않는다. 비어 있다고 「다 지웠다」로 읽으면
+        // 그 폴더에 있던 기록을 다른 계정 폴더에서도 지운다. 처음 보는 폴더처럼 다른 폴더의 기록으로 채운다.
+        if (!existed && (state.synced[tree] || []).some((s) => lower(s) === lower(d))) {
+          state.synced[tree] = state.synced[tree].filter((s) => lower(s) !== lower(d));
+          ctx.manifests[tree]?.delete(d);
+          ctx.stateDirty = true;
+          log(`${short(path.basename(path.dirname(d)) + "/" + path.basename(d))}: 사라졌던 짝 폴더를 다시 만듦 — 지운 것으로 치지 않고 채움`);
+        }
+      } catch (e) { log(`${d} 준비 실패: ${e.code || ""} ${e.message}`); }
+    }
     ok.sort();
     const before = (ctx.family[tree] || ctx.lastFamily?.[tree] || []).map(lower).join("|");
     ctx.family[tree] = ok;
@@ -590,7 +631,8 @@ function tick(ctx, opts = {}) {
     ctx.lastConfigScan = Date.now();
     for (const key of pairsFromConfigs()) if (seen(key)) newPair = true;
   }
-  if (newPair || !ctx.family || Date.now() - (ctx.lastFamilyScan || 0) >= CONFIG_SCAN_MS) { ctx.lastFamilyScan = Date.now(); refreshFamily(ctx); }
+  // rootsMoved: 짝 폴더가 통째로 없어졌다(앱이 데이터를 다른 자리로 옮김) — 1분을 기다리지 않고 뿌리를 다시 찾는다.
+  if (newPair || ctx.rootsMoved || !ctx.family || Date.now() - (ctx.lastFamilyScan || 0) >= CONFIG_SCAN_MS) { ctx.lastFamilyScan = Date.now(); ctx.rootsMoved = false; refreshFamily(ctx); }
   if (!ctx.family) return;
   // 앱이 어떤 짝 폴더에서 세션을 0개 읽었고 메모리에도 없었는데(existingSessions=0) 다른 폴더엔 기록이 있으면, 채운 뒤 「껐다 켜기」를 알린다.
   // 같은 계정 재로그인(existingSessions>0 뒤 「Loaded 0」)은 목록이 이미 보이는 상태라 빈 목록으로 치지 않는다.

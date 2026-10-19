@@ -112,6 +112,11 @@ $Body = @'
         if (Test-Path -LiteralPath $packages) {
             $roots += @(Get-ChildItem -LiteralPath $packages -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'LocalCache\Roaming\Claude' })
         }
+        # 스토어판은 2026-10-19부터 데이터를 패키지 밖 %LOCALAPPDATA%\Claude-Data\claude_*로 통째로 옮기기도 한다.
+        $outside = Join-Path $env:LOCALAPPDATA 'Claude-Data'
+        if (Test-Path -LiteralPath $outside) {
+            $roots += @(Get-ChildItem -LiteralPath $outside -Directory -Filter 'claude_*' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        }
         $roots += Join-Path $env:APPDATA 'Claude'
         $found = @($roots | Where-Object { (Test-Path -LiteralPath (Join-Path $_ 'claude-code-sessions')) -or (Test-Path -LiteralPath (Join-Path $_ 'local-agent-mode-sessions')) })
         if ($found.Count -eq 0) {
