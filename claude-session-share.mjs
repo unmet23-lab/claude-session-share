@@ -7,12 +7,14 @@
 // 짝 폴더를 junction(연결 폴더)으로 묶으면 앱이 쓰기를 거부한다 — main.log 「Refusing non-directory at private dir path (symlink/file plant)」,
 // 앱이 lstat·realpath로 reparse point를 막기 때문이다. 그래서 연결은 전혀 쓰지 않는다:
 //   - 모든 짝 폴더를 실제 폴더로 두고(남은 junction은 실제 폴더로 바꾼다), 어느 한 폴더의 변화(추가·수정·삭제)를 나머지 전부에 옮긴다.
-//   - 새로 생긴 파일과 지운 파일은 바로 옮긴다. 이미 있는 파일을 고쳐 쓴 것(앱이 세션 기록을 차례마다 다시 쓴다)은 1분씩 모아
+//   - 새로 생긴 파일과 지운 파일은 바로 옮긴다. 이미 있는 파일을 고쳐 쓴 것(앱이 세션 기록을 차례마다 다시 쓴다)은 5분씩 모아
 //     파일마다 마지막 판만 옮긴다. 앱 기록(main.log)에 로그인·로그아웃 줄이 보이면 기다리지 않고 바로 전부 맞추고,
 //     로그아웃 뒤 다음 로그인까지는 모으지 않는다 — 앱은 로그인할 때만 폴더를 읽으므로 계정을 바꿀 때 모든 폴더가 최신이다.
 //   - 맞추는 대상은 앱이 로그인한 적 있는 짝(main.log 기록·터미널 로그인 파일)뿐이다. 로그인 기록이 없는 짝 폴더(옛 판이 계정×조직
 //     조합으로 만들어 둔 것 등)는 다른 폴더와 맞춰진 상태로 백업 폴더로 옮겨 쉬게 한다. 그 짝으로 처음 로그인하면 앱이 빈 폴더를
 //     새로 만들어 읽으므로, 처음 쓰는 계정과 같은 길(채우고 「껐다 켜기」 알림)로 맞춰진다.
+//   - 앱이 계정을 바꾸며 「앞 계정 + 새 조직」으로 몇 초만 초기화한 짝(곧바로 다른 짝 로그인 줄이 이어짐)은 로그인 기록으로 치지 않는다.
+//     그 짝 폴더는 채우지 않고 두었다가 쉬게 한다. 처음 보는 짝의 로그인은 이것을 가리려고 30초 지켜본 뒤 채우고 알린다.
 //   - 같은 파일이 폴더마다 다르면 더 최근(mtime) 것이 이긴다. 삭제는 「지난번엔 있었는데 없어진」 폴더에서만 읽어 전파한다.
 //   - 세션 기록(local_*.json)은 삭제 표식(deleted_<CLI 세션ID>)이 어디든 있으면 지운 것으로 보고 되살리지 않는다.
 //   - 예약 작업 목록(scheduled-tasks.json)만은 파일째 맞추지 않고 작업(id)마다 합친다. 앱은 로그인할 때마다 목록을 다시 쓰고
@@ -46,7 +48,11 @@ const POLL_MS = 1000;
 const WATCH_DEBOUNCE_MS = 150;
 // 이미 있는 파일을 고쳐 쓴 것은 이만큼 모아 옮긴다(새 파일·지운 파일·로그인·로그아웃은 바로). 앱이 세션 기록(약 100KB)을
 // 차례마다 다시 써서, 바뀔 때마다 모든 폴더에 옮기면 한 시간에 수 GB를 쓴다(2026-10-20 8시간 87,556번 복사).
-const BATCH_MS = envMs("CLAUDE_SESSION_SHARE_BATCH_MS", 60000);
+// 5분은 전체 대조 주기와 같다. 계정을 바꿀 때는 로그아웃·로그인 줄을 보고 바로 맞추므로 간격이 길어도 바꾼 계정 폴더는 늘 최신이고,
+// 그사이 다른 폴더에서 늦는 것은 마지막 활동 시각·차례 수 같은 활동 칸뿐이다(새 세션·지운 세션은 바로 옮긴다).
+// 2026-10-20 15분 실측(바쁠 때, 받는 곳 6곳): 60초 시간당 2,640번 → 5분 1,464번 → 10분 1,176번.
+const BATCH_MS = envMs("CLAUDE_SESSION_SHARE_BATCH_MS", 300000);
+const batchText = () => (BATCH_MS % 60000 === 0 ? `${BATCH_MS / 60000}분` : `${Math.round(BATCH_MS / 1000)}초`);
 // 로그아웃 줄을 본 뒤 다음 로그인까지(길어야 10분)는 모으지 않는다 — 언제 다른 계정으로 로그인할지 모른다.
 const LOGGED_OUT_FAST_MS = 10 * 60000;
 const FULL_SCAN_MS = 5 * 60000;
@@ -62,6 +68,10 @@ const OWN_WRITE_TTL_MS = 10000;
 // 로그인 기록이 없는 짝 폴더는 만든 지 이만큼 지나고 다른 폴더와 맞춰진 뒤에만 쉬게 한다(앱이 막 만든 폴더는 건드리지 않는다).
 const PARK_MIN_AGE_MS = envMs("CLAUDE_SESSION_SHARE_PARK_MIN_AGE_MS", 3600000);
 const PARK_RETRY_MS = 3600000;
+// 앱은 계정을 바꿀 때 「앞 계정 + 새 조직」으로 몇 초만 초기화했다가 곧바로 새 계정으로 다시 초기화하기도 한다
+// (10-17~19 9번, 1~13초 뒤, existingSessions 77~131). 이 짝은 앱이 실제로 쓰지 않으므로 로그인 기록으로 치지 않는다.
+// 로그인 줄 바로 다음 일이 이 시간 안의 다른 짝 로그인 줄이면(사이에 로그아웃 없음) 지나가는 로그인이다.
+const TRANSIENT_MS = envMs("CLAUDE_SESSION_SHARE_TRANSIENT_MS", 30000);
 const VERBOSE = !!process.env.CLAUDE_SESSION_SHARE_VERBOSE;
 const LOG_FIRST_READ_MAX = 8 * 1024 * 1024;
 const LOG_FILE_MAX = 512 * 1024;
@@ -191,10 +201,35 @@ function findMainLog() {
 }
 
 /* ---------- 계정 짝 찾기 ---------- */
+// main.log 줄 맨 앞의 「YYYY-MM-DD HH:MM:SS」(이 PC 시각)를 ms로 읽는다. 없으면 null.
+function lineTime(text, at) {
+  const start = text.lastIndexOf("\n", at - 1) + 1;
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(text.slice(start, start + 19));
+  return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() : null;
+}
+
+// 로그인 줄들을 진짜 로그인·지나가는 로그인·아직 모름으로 나눈다. seq: 시간 순서의 {type: "init"|"logout", key, ts}.
+// 지나가는 로그인: 바로 다음 일이 TRANSIENT_MS 안의 다른 짝 로그인이다(사이에 로그아웃이 있으면 짧아도 진짜 로그인).
+// 마지막 로그인 줄이 아직 TRANSIENT_MS 안이면 다음 줄을 기다린다(pending).
+function classifyInits(seq, now) {
+  const real = [], transient = [];
+  let pending = null;
+  for (let i = 0; i < seq.length; i++) {
+    const e = seq[i];
+    if (e.type !== "init") continue;
+    const next = seq[i + 1];
+    if (!next) { if (e.ts == null || now - e.ts >= TRANSIENT_MS) real.push(e); else pending = e; continue; }
+    if (next.type === "init" && next.key !== e.key && e.ts != null && next.ts != null && next.ts - e.ts >= 0 && next.ts - e.ts <= TRANSIENT_MS) transient.push({ ...e, gap: next.ts - e.ts });
+    else real.push(e);
+  }
+  return { real, transient, pending };
+}
+
 // 로그에서 새로 나온 줄을 읽어 로그인 짝·「Loaded N persisted sessions」·로그아웃을 모은다.
 // ok: 앱 기록을 실제로 찾아 읽었다(로그인 기록이 없는 짝을 쉬게 할지는 이때만 판단한다).
+// seq: 로그인·로그아웃 줄을 줄 시각과 함께 순서대로(지나가는 로그인을 가려내는 데 쓴다).
 function readLogEvents(state, logPath) {
-  const out = { inits: [], loaded: [], logout: false, ok: false };
+  const out = { inits: [], loaded: [], logout: false, ok: false, seq: [] };
   if (!logPath) return out;
   let size;
   try { size = fs.statSync(logPath).size; } catch { return out; }
@@ -211,33 +246,39 @@ function readLogEvents(state, logPath) {
   const text = buf.subarray(0, lastNl).toString("utf8");
   // 시간 순서를 지키려고 세 가지를 위치와 함께 모은다.
   const ev = [];
-  for (const m of text.matchAll(INIT_LINE)) ev.push({ at: m.index, type: "init", key: pairKey(m[1], m[2]), existing: m[3] === undefined ? null : Number(m[3]) });
+  for (const m of text.matchAll(INIT_LINE)) ev.push({ at: m.index, type: "init", key: pairKey(m[1], m[2]), existing: m[3] === undefined ? null : Number(m[3]), ts: lineTime(text, m.index) });
   for (const m of text.matchAll(LOADED_LINE)) if (UUID.test(m[3]) && UUID.test(m[4])) ev.push({ at: m.index, type: "loaded", n: Number(m[1]), tree: path.basename(m[2]), key: pairKey(m[3], m[4]) });
-  for (const m of text.matchAll(LOGOUT_LINE)) ev.push({ at: m.index, type: "logout" });
+  for (const m of text.matchAll(LOGOUT_LINE)) ev.push({ at: m.index, type: "logout", ts: lineTime(text, m.index) });
   ev.sort((a, b) => a.at - b.at);
   // 「Loaded N」 줄에는 그 짝의 바로 앞 로그인 줄의 existingSessions를 붙인다. 두 줄이 다른 바퀴에 읽혀도 되게 상태에 둔다.
   const existing = (state.existing ||= {});
   for (const e of ev) {
-    if (e.type === "init") { out.inits.push(e.key); out.logout = false; existing[e.key] = e.existing; }
+    if (e.type === "init") { out.inits.push(e.key); out.logout = false; existing[e.key] = e.existing; out.seq.push({ type: "init", key: e.key, ts: e.ts }); }
     else if (e.type === "loaded") out.loaded.push({ ...e, existing: existing[e.key] ?? null });
-    else out.logout = true;
+    else { out.logout = true; out.seq.push({ type: "logout", ts: e.ts }); }
   }
   return out;
 }
 
-// 넘어간 앱 기록(main1.log…)까지 모두 읽어 로그인한 짝을 모은다. 로그인 기록이 없는 짝 폴더는 쉬게 하므로, 기록이 넘어가며
-// 잘려 나간 옛 로그인도 놓치지 않게 켤 때 한 번 읽는다(짝만 배우고 알림 같은 일은 하지 않는다).
-function pairsFromAllLogs(logPath) {
-  const keys = new Set();
+// 넘어간 앱 기록(main3.log → main2.log → main1.log → main.log, 옛것부터)까지 모두 읽어 로그인한 짝을 모은다.
+// 로그인 기록이 없는 짝 폴더는 쉬게 하므로, 기록이 넘어가며 잘려 나간 옛 로그인도 놓치지 않게 켤 때 한 번 읽는다
+// (짝만 배우고 알림 같은 일은 하지 않는다). real: 진짜 로그인이 한 번이라도 있는 짝, all: 로그인 줄이 있는 모든 짝.
+function pairsFromAllLogs(logPath, now) {
   const dir = path.dirname(logPath);
-  for (const n of safeReaddir(dir)) {
-    if (!/^main\d*\.log$/i.test(n)) continue;
+  const num = (n) => { const m = /^main(\d+)\.log$/i.exec(n); return m ? Number(m[1]) : -1; };
+  const files = safeReaddir(dir).filter((n) => /^main\d*\.log$/i.test(n)).sort((a, b) => num(b) - num(a));
+  const seq = [];
+  for (const n of files) {
     let text;
     try { text = fs.readFileSync(path.join(dir, n), "utf8"); } catch { continue; }
-    for (const m of text.matchAll(INIT_LINE)) keys.add(pairKey(m[1], m[2]));
-    for (const m of text.matchAll(LOADED_LINE)) if (UUID.test(m[3]) && UUID.test(m[4])) keys.add(pairKey(m[3], m[4]));
+    const ev = [];
+    for (const m of text.matchAll(INIT_LINE)) ev.push({ at: m.index, type: "init", key: pairKey(m[1], m[2]), ts: lineTime(text, m.index) });
+    for (const m of text.matchAll(LOGOUT_LINE)) ev.push({ at: m.index, type: "logout", ts: lineTime(text, m.index) });
+    ev.sort((a, b) => a.at - b.at);
+    seq.push(...ev);
   }
-  return keys;
+  const cls = classifyInits(seq, now);
+  return { real: new Set(cls.real.map((e) => e.key)), all: new Set(seq.filter((e) => e.type === "init").map((e) => e.key)) };
 }
 
 // 터미널 claude 로그인 파일에서도 짝을 안다(앱에서 아직 로그인하지 않은 계정의 폴더를 미리 채워 둔다).
@@ -607,11 +648,24 @@ function ensureRealDir(p) {
 
 // 로그인 기록이 없는 짝 폴더를 쉬게 해도 되는지. 앱 기록을 읽은 뒤에만, 다른 폴더와 맞춰진 폴더만(합치기 전이면 먼저 합친다),
 // 만든 지 PARK_MIN_AGE_MS가 지난 폴더만(앱이 막 만든 폴더는 건드리지 않는다), 넘어간 앱 기록에도 그 짝이 없을 때만.
+// 지나가는 로그인 짝(또는 판정을 기다리는 로그인 짝)의 폴더에 맞출 파일이 하나도 없으면(앱이 막 만든 빈 폴더, 예약 목록만 있음)
+// 다른 폴더의 기록으로 채우지 않고 둔다 — 채우면 몇 초 뒤 쓰이지 않을 폴더에 3,600여 파일을 복사하게 된다.
+// 판정을 기다리던 로그인이 진짜로 판정되면 알려진 짝이 되어 그때 채우고(빈 목록이었으면 그때 알림), 지나간 것이면 나중에 쉬게 한다.
+function passingPair(ctx, key) {
+  const { state } = ctx;
+  return !state.known[key] && (!!state.transient?.[key] || state.pendingInit?.key === key);
+}
+const nothingToMerge = (d) => scanDir(d).size === 0;
+
+// 로그인 기록이 없는 짝 폴더를 쉬게 해도 되는지. 앱 기록을 읽은 뒤에만, 다른 폴더와 맞춰진 폴더만(합치기 전이면 먼저 합친다 —
+// 지나가는 짝의 맞출 것 없는 폴더는 합칠 것이 없으니 바로), 만든 지 PARK_MIN_AGE_MS가 지난 폴더만(앱이 막 만든 폴더는 건드리지 않는다),
+// 넘어간 앱 기록에도 그 짝의 진짜 로그인이 없을 때만.
 function parkable(ctx, tree, d, key) {
   const { state } = ctx;
-  if (!ctx.logSeen || key === state.active || state.known[key] || ctx.loggedPairs?.has(key)) return false;
+  if (!ctx.logSeen || key === state.active || state.known[key] || ctx.loggedPairs?.has(key) || state.pendingInit?.key === key) return false;
   if (Date.now() < (ctx.parkRetryAt?.get(lower(d)) || 0)) return false;
-  if (!(state.synced[tree] || []).some((s) => lower(s) === lower(d))) return false;
+  const synced = (state.synced[tree] || []).some((s) => lower(s) === lower(d));
+  if (!synced && !(state.transient?.[key] && nothingToMerge(d))) return false;
   let born = 0;
   try { born = fs.statSync(d).birthtimeMs; } catch { return false; }
   return born > 0 && Date.now() - born >= PARK_MIN_AGE_MS;
@@ -668,6 +722,11 @@ function refreshFamily(ctx) {
           (ctx.parkRetryAt ||= new Map()).set(lower(d), Date.now() + PARK_RETRY_MS);
           log(`${short(key)}: 쉬게 하지 못해 그대로 맞춤(한 시간 뒤 다시): ${e.code || ""} ${e.message}`);
         }
+      }
+      if (ctx.logSeen && passingPair(ctx, key) && kind(d) === "dir" && nothingToMerge(d)) {
+        const k = `${tree}|${lower(d)}`;
+        if (!(ctx.heldLogged ||= new Set()).has(k)) { ctx.heldLogged.add(k); log(`${short(key)}: 로그인 판정 전이거나 앱이 잠깐 거친 짝의 빈 폴더 — ${tree} 맞추는 대상에 넣지 않고 둠(진짜 로그인이면 곧 채움)`); }
+        continue;
       }
       try {
         const existed = kind(d) === "dir";
@@ -771,10 +830,31 @@ function tick(ctx, opts = {}) {
   ctx.logReadOnce = true;
   const seen = (key) => { if (!state.known[key]) { state.known[key] = new Date().toISOString(); markState(ctx, true); return true; } return false; };
   let newPair = false;
-  // 켤 때 한 번, 넘어간 앱 기록(main1.log…)까지 읽어 로그인한 짝을 배운다(로그인 기록이 없는 짝만 쉬게 하므로).
-  if (ev.ok && !ctx.loggedPairs) { ctx.loggedPairs = pairsFromAllLogs(ctx.mainLog); for (const key of ctx.loggedPairs) if (seen(key)) newPair = true; }
-  for (const key of ev.inits) { if (seen(key)) newPair = true; if (state.active !== key) { state.active = key; markState(ctx, true); } }
-  for (const e of ev.loaded) if (seen(e.key)) newPair = true;
+  // 켤 때 한 번, 넘어간 앱 기록(main1.log…)까지 읽어 진짜로 로그인한 짝을 배운다(로그인 기록이 없는 짝만 쉬게 하므로).
+  // 지나가는 로그인뿐인 짝이 알려진 짝에 남아 있으면(이전 판이 넣었다) 뺀다 — 터미널 로그인 짝·지금 계정은 그대로 둔다.
+  if (ev.ok && !ctx.loggedPairs) {
+    const logs = pairsFromAllLogs(ctx.mainLog, now);
+    ctx.loggedPairs = logs.real;
+    for (const key of logs.real) if (seen(key)) newPair = true;
+    const cfg = new Set(pairsFromConfigs());
+    const demoted = Object.keys(state.known).filter((key) => logs.all.has(key) && !logs.real.has(key) && !cfg.has(key) && key !== state.active && key !== state.pendingInit?.key);
+    for (const key of demoted) { delete state.known[key]; (state.transient ||= {})[key] = new Date().toISOString(); }
+    if (demoted.length) { markState(ctx, true); newPair = true; log(`앱이 계정을 바꾸며 몇 초만 거친 짝 ${demoted.length}곳을 로그인 기록에서 뺌(${demoted.map(short).join(", ")})`); }
+  }
+  // 로그인 줄: 진짜 로그인만 알려진 짝에 넣는다. 마지막 줄이 아직 TRANSIENT_MS 안이면 다음 바퀴까지 판정을 미룬다(상태에 둔다).
+  const cls = classifyInits([...(state.pendingInit ? [{ type: "init", ...state.pendingInit }] : []), ...ev.seq], now);
+  for (const e of cls.real) {
+    if (seen(e.key)) newPair = true;
+    if (state.transient?.[e.key]) { delete state.transient[e.key]; markState(ctx, true); }
+  }
+  for (const e of cls.transient) if (!state.known[e.key]) {
+    if (!state.transient?.[e.key]) log(`${short(e.key)}: 앱이 계정을 바꾸며 ${Math.round(e.gap / 1000)}초만 거친 짝 — 로그인 기록으로 치지 않음`);
+    (state.transient ||= {})[e.key] = new Date(e.ts ?? now).toISOString();
+    markState(ctx, true);
+  }
+  const pending = cls.pending ? { key: cls.pending.key, ts: cls.pending.ts } : null;
+  if ((pending?.key ?? null) !== (state.pendingInit?.key ?? null) || (pending?.ts ?? null) !== (state.pendingInit?.ts ?? null)) { state.pendingInit = pending; markState(ctx, true); }
+  for (const key of ev.inits) if (state.active !== key) { state.active = key; markState(ctx, true); }
   if (ev.logout && state.active !== null) { state.active = null; markState(ctx, true); }
   // 로그아웃 뒤 다음 로그인까지는 모으지 않고 바로 옮긴다. 로그인·로그아웃 줄을 보면 기다리지 않고 바로 전부 맞춘다.
   if (ev.logout) ctx.loggedOutAt = now; else if (ev.inits.length) ctx.loggedOutAt = 0;
@@ -820,12 +900,16 @@ function tick(ctx, opts = {}) {
   if (!ctx.dirty.size) ctx.dirtySince = 0;
   else if (!ctx.dirtySince) ctx.dirtySince = now; // 실패해 다시 할 것이 남았다
   if (ctx.own?.size) for (const [k, v] of ctx.own) if (now - v.at >= OWN_WRITE_TTL_MS) ctx.own.delete(k);
+  // 빈 목록을 읽은 짝은 그 로그인이 진짜로 판정되고(알려진 짝) 폴더가 채워진 뒤에 알린다. 지나가는 로그인이면 알리지 않는다.
+  const waiting = (ctx.pendingEmpty ||= new Map());
+  for (const e of emptyLoads) waiting.set(e.key, now);
   let filled = 0;
-  for (const e of emptyLoads) {
-    const d = path.join(ctx.primary || "", "claude-code-sessions", ...e.key.split("/"));
-    const n = countRecords(d);
+  for (const [key, at] of waiting) {
+    if (!state.known[key]) { if (state.transient?.[key] || now - at > 5 * 60000) waiting.delete(key); continue; }
+    waiting.delete(key);
+    const n = countRecords(path.join(ctx.primary || "", "claude-code-sessions", ...key.split("/")));
     if (n > 0) {
-      log(`${short(e.key)}에서 앱이 세션 0개를 읽었음 — 지금은 ${n}개 채워져 있어 껐다 켜면 보임`);
+      log(`${short(key)}에서 앱이 세션 0개를 읽었음 — 지금은 ${n}개 채워져 있어 껐다 켜면 보임`);
       filled = Math.max(filled, n);
     }
   }
@@ -892,8 +976,9 @@ function loadState() {
   // v1(junction 판) 상태에서 이어받을 것: 로그 위치·알려진 짝·지금 계정. home은 더 쓰지 않는다.
   const union = s.v === 2 ? s.union || {} : {};
   for (const tree of TREES) if (union[tree]) delete union[tree][REGISTRY]; // 예약 목록은 파일 미러에서 뺐다
-  // parked: 로그인 기록이 없어 쉬게 한 짝 폴더 {트리 → {짝 → {at, to}}}. 같은 v: 2에 칸만 더했다(옛 판으로 되돌려도 읽힌다).
-  return { v: 2, logPath: s.logPath, logOffset: s.logOffset || 0, known: s.known || {}, active: s.active || null, union, synced: s.v === 2 ? s.synced || {} : {}, tasks: s.v === 2 ? s.tasks || {} : {}, existing: s.v === 2 ? s.existing || {} : {}, parked: s.v === 2 ? s.parked || {} : {} };
+  // parked: 로그인 기록이 없어 쉬게 한 짝 폴더 {트리 → {짝 → {at, to}}}. transient: 앱이 계정을 바꾸며 몇 초만 거친 짝 {짝 → 시각}.
+  // pendingInit: 아직 판정하지 않은 마지막 로그인 줄 {key, ts}. 같은 v: 2에 칸만 더했다(옛 판으로 되돌려도 읽힌다).
+  return { v: 2, logPath: s.logPath, logOffset: s.logOffset || 0, known: s.known || {}, active: s.active || null, union, synced: s.v === 2 ? s.synced || {} : {}, tasks: s.v === 2 ? s.tasks || {} : {}, existing: s.v === 2 ? s.existing || {} : {}, parked: s.v === 2 ? s.parked || {} : {}, transient: s.v === 2 ? s.transient || {} : {}, pendingInit: s.v === 2 ? s.pendingInit || null : null };
 }
 
 function makeCtx(daemon) {
@@ -924,6 +1009,11 @@ function printStatus(ctx) {
       const p = path.join(r, tree, ...key.split("/")), k = kind(p);
       const n = k === "dir" ? countRecords(p) : 0;
       const files = k === "dir" ? scanDir(p).size : 0;
+      // 앱이 계정을 바꾸며 몇 초만 거친 짝의 빈 폴더는 맞추지 않고 두므로 판정에서 뺀다.
+      if (k === "dir" && files === 0 && !state.known[key] && (state.transient?.[key] || state.pendingInit?.key === key)) {
+        rows.push(`  ${key}  (앱이 계정을 바꾸며 잠깐 거친 짝 — 맞추지 않고 두었다가 쉬게 합니다)`);
+        continue;
+      }
       const reg = k === "dir" ? readRegistry(p) : null;
       const tasks = reg ? (reg.bad ? ", 예약 목록 읽기 실패" : `, 예약 ${reg.ids.length}개`) : "";
       const extra = k === "dir" ? `${n}개 세션 기록, 파일 ${files}개${tasks}` : k === "link" ? "바로 가기 폴더(다음 맞춤 때 실제 폴더로 바꿈)" : k;
@@ -943,7 +1033,7 @@ function printStatus(ctx) {
     const parked = Object.keys(state.parked?.[tree] || {}).length;
     if (parked) console.log(`  쉬는 짝 폴더 ${parked}곳(이 PC에서 로그인한 기록이 없음 — 그 계정으로 처음 로그인하면 바로 채우고 「껐다 켜기」를 알립니다)`);
   }
-  console.log(`맞추는 방식: 새 세션·지운 세션·로그인·로그아웃은 바로, 이미 있는 기록을 고쳐 쓴 것은 ${Math.round(BATCH_MS / 1000)}초씩 모아서`);
+  console.log(`맞추는 방식: 새 세션·지운 세션·로그인·로그아웃은 바로, 이미 있는 기록을 고쳐 쓴 것은 ${batchText()}씩 모아서`);
   const snaps = snapshotDirs();
   console.log(`백업: ${snaps.length}개${snaps[0] ? `, 최근 ${path.basename(snaps[0])}` : ""}`);
 }
@@ -993,7 +1083,7 @@ if (mode === "help") {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(PID_PATH, JSON.stringify(process.pid));
   const ctx = makeCtx(true);
-  log(`지켜보기 시작(v3 미러: 고쳐 쓴 기록은 ${Math.round(BATCH_MS / 1000)}초씩 모아서, 로그인 기록이 없는 짝은 쉬게)`);
+  log(`지켜보기 시작(v3 미러: 고쳐 쓴 기록은 ${batchText()}씩 모아서, 로그인 기록이 없는 짝·잠깐 거친 짝은 쉬게)`);
   runTick(ctx);
   setInterval(() => {
     // 폴더 자체의 mtime이 바뀌면(파일 추가·삭제·이름 바꾸기) 그 폴더를 다음 묶음 때 다시 본다. 감시(fs.watch)가 놓친 것의 뒷받침.

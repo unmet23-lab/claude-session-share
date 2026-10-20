@@ -85,9 +85,9 @@ test("맞춘 뒤 사라진 짝 폴더를 다시 만들 때 비어 있다고 다�
   const t = setup("vanished");
   t.put(t.outside, "A", "local_v1.json", { sessionId: "local_v1", cliSessionId: "55555555-5555-4555-8555-555555555555" });
   fs.mkdirSync(t.dir(t.outside, "B"), { recursive: true });
-  // 앱 기록에 두 계정이 로그인한 줄이 있어 둘 다 「알던 짝」이 된다.
-  const init = (acct) => `2026-10-19 21:32:16 [info] [LocalSessionManager] Initialization succeeded — accountId=${acct}, orgId=${ORG}, existingSessions=0\n`;
-  fs.appendFileSync(path.join(t.env.LOCALAPPDATA, "Claude", "logs", "main.log"), init(ACCT.A) + init(ACCT.B));
+  // 앱 기록에 두 계정이 로그인한 줄이 있어 둘 다 「알던 짝」이 된다(30초 안에 이어지면 지나가는 로그인이라 시각을 떨어뜨린다).
+  const init = (acct, at) => `${at} [info] [LocalSessionManager] Initialization succeeded — accountId=${acct}, orgId=${ORG}, existingSessions=0\n`;
+  fs.appendFileSync(path.join(t.env.LOCALAPPDATA, "Claude", "logs", "main.log"), init(ACCT.A, "2026-10-19 21:32:16") + init(ACCT.B, "2026-10-19 21:40:02"));
   t.run();
   assert.ok(t.has(t.outside, "B", "local_v1.json"));
   fs.rmSync(t.dir(t.outside, "B"), { recursive: true, force: true });

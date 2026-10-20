@@ -73,14 +73,14 @@ Code 탭 세션(claude-code-sessions): 3곳, 맞춘 파일 120개
   ○ 3곳이 모두 같습니다(세션 41개)                      ← 이 줄이 나오면 잘 된 것
 Cowork 세션(local-agent-mode-sessions): 0곳, 맞춘 파일 0개
   (없음 — 쓰지 않으면 정상입니다)
-맞추는 방식: 새 세션·지운 세션·로그인·로그아웃은 바로, 이미 있는 기록을 고쳐 쓴 것은 60초씩 모아서
+맞추는 방식: 새 세션·지운 세션·로그인·로그아웃은 바로, 이미 있는 기록을 고쳐 쓴 것은 5분씩 모아서
 백업: 2개, 최근 20261018-13
 ```
 
 - 「○ …곳이 모두 같습니다」가 나오면 잘 맞춰진 것입니다.
 - 「△ 아직 서로 다른 폴더가 있습니다」는 맞추는 중이라는 뜻입니다. 몇 초 뒤 다시 보세요.
 - 「지켜보기: 꺼져 있음」이면 설치 한 줄을 다시 붙여 넣으세요.
-- 「쉬는 짝 폴더 N곳」은 이 PC에서 한 번도 로그인한 적 없는 계정 폴더를 맞추는 대상에서 뺐다는 뜻입니다(아래 「자세히」). 에러가 아닙니다.
+- 「쉬는 짝 폴더 N곳」은 이 PC에서 한 번도 로그인한 적 없는 계정 폴더(또는 앱이 계정을 바꾸며 몇 초만 거친 짝)를 맞추는 대상에서 뺐다는 뜻입니다(아래 「자세히」). 에러가 아닙니다.
 
 ## 자주 막히는 곳
 
@@ -141,9 +141,10 @@ powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\claude-session-share
 이 도구의 자동 맞춤 프로그램(지켜보기)이 이 계정 폴더들을 서로 똑같이 맞춥니다.
 
 - 한 폴더에서 생기거나 지워진 파일은 1~2초 안에 나머지 폴더 전부에 옮깁니다. 새 세션이 생기거나 세션을 지우면 다른 계정 폴더에도 곧바로 반영됩니다.
-- 이미 있는 세션 기록을 고쳐 쓴 것은 60초씩 모아, 파일마다 마지막 판만 옮깁니다. 앱은 세션 기록(한 개 약 100KB)을 대화가 오갈 때마다 다시 쓰는데, 그때마다 모든 계정 폴더에 옮기면 한 시간에 수 GB를 쓰게 됩니다.
+- 이미 있는 세션 기록을 고쳐 쓴 것은 5분씩 모아, 파일마다 마지막 판만 옮깁니다. 앱은 세션 기록(한 개 약 100KB)을 대화가 오갈 때마다 다시 쓰는데, 그때마다 모든 계정 폴더에 옮기면 한 시간에 수 GB를 쓰게 됩니다.
 - 앱 기록(`main.log`)에 로그아웃·로그인 줄이 보이면 기다리지 않고 바로 전부 맞춥니다. 로그아웃한 뒤 다음 로그인까지는 모으지 않습니다. 앱은 로그인할 때만 목록을 읽으므로, 계정을 바꿀 때는 모든 폴더가 이미 최신입니다.
 - 맞추는 대상은 이 PC에서 로그인한 적 있는 계정 폴더입니다(앱 기록과 터미널 `claude` 로그인 파일로 압니다). 한 번도 로그인한 적 없는 계정 폴더(옛 판이 계정×조직 조합으로 만들어 둔 것 등)는 다른 폴더와 맞춰진 상태로 설치 폴더의 백업(`날짜-시각-parked\`)으로 옮겨 쉬게 합니다. 그 계정으로 처음 로그인하면 앱이 빈 폴더를 새로 만들고, 도구가 바로 채운 뒤 「한 번만 껐다 켜 주세요」 알림을 띄웁니다(처음 쓰는 계정과 같습니다). 앱 기록을 못 읽었거나 만든 지 한 시간이 안 된 폴더는 건드리지 않습니다.
+- 앱은 계정을 바꿀 때 「앞 계정 + 새 계정의 조직」 짝으로 몇 초만 초기화했다가 곧바로 새 계정으로 다시 초기화하기도 합니다(앱 기록에 로그인 줄이 1~13초 사이로 둘 이어짐). 이 짝은 앱이 실제로 쓰지 않으므로 로그인 기록으로 치지 않고, 그 폴더는 채우지 않고 두었다가 쉬게 합니다. 그래서 처음 보는 계정의 로그인은 30초 동안 지켜본 뒤 채우고 알립니다.
 - 같은 파일이 폴더마다 다르면 더 최근에 고친 쪽이 이깁니다.
 - 앱이 지운 세션은 다른 폴더에 옛 사본이 있어도 되살리지 않습니다.
 - 앱이 잠깐 쓰고 지우는 임시 파일(`*.tmp`)은 옮기지 않습니다.
@@ -217,7 +218,7 @@ Copy-Item "<백업 폴더>\scheduled-tasks.json" $f
 |---|---|
 | `CLAUDE_SESSION_SHARE_HOME` | 상태·기록·백업을 둘 폴더. 기본은 `%LOCALAPPDATA%\claude-session-share` |
 | `CLAUDE_SESSION_SHARE_CONFIG_DIRS` | 터미널 `claude`의 다른 로그인 폴더들(`;`로 구분). 그 폴더의 `.claude.json`에 있는 계정도 미리 채워 둡니다. |
-| `CLAUDE_SESSION_SHARE_BATCH_MS` | 고쳐 쓴 세션 기록을 모으는 시간(밀리초). 기본 60000(60초). 새 파일·지운 파일·로그인·로그아웃은 이 값과 상관없이 바로 맞춥니다. |
+| `CLAUDE_SESSION_SHARE_BATCH_MS` | 고쳐 쓴 세션 기록을 모으는 시간(밀리초). 기본 300000(5분). 새 파일·지운 파일·로그인·로그아웃은 이 값과 상관없이 바로 맞춥니다. |
 
 `~/.claude.json`과 `CLAUDE_CONFIG_DIR`은 따로 설정하지 않아도 읽습니다(계정·조직 ID만 봅니다).
 
@@ -241,7 +242,7 @@ node --test
 
 ## English
 
-**What it does.** If you rotate several Claude accounts in the Claude desktop app on Windows, the Code tab shows an empty session list whenever you switch. Your transcripts in `~/.claude/projects` are still there. The app simply keeps its session list in a separate folder for each account and organization pair, under `claude-code-sessions\<account id>\<org id>\`. This tool keeps all of those folders identical. New and deleted files are copied across within a second or two; rewrites of existing session records (the app rewrites a ~100 KB record on every turn) are batched for 60 seconds and only the latest version is copied. As soon as the app's log shows a sign-out or sign-in, everything is synced at once, and nothing is batched between a sign-out and the next sign-in, so every folder is current whenever the app reads one. Only folders of account pairs that have signed in on this PC are kept in sync; folders that never did (for example account × organization combinations created by older versions) are moved into the backup folder (`*-parked`) once they match the others, and a first sign-in there takes the usual first-use path (the folder is filled and you are asked to restart Claude once). It lets the newest version of a file win, skips the app's short-lived `*.tmp` files, and never revives a session the app deleted. Cowork sessions (`local-agent-mode-sessions`) are mirrored the same way. It never reads, changes or deletes your conversations, sends nothing over the internet, and does not read passwords or login tokens. Regular chat conversations live on Anthropic's servers per account and are not affected.
+**What it does.** If you rotate several Claude accounts in the Claude desktop app on Windows, the Code tab shows an empty session list whenever you switch. Your transcripts in `~/.claude/projects` are still there. The app simply keeps its session list in a separate folder for each account and organization pair, under `claude-code-sessions\<account id>\<org id>\`. This tool keeps all of those folders identical. New and deleted files are copied across within a second or two; rewrites of existing session records (the app rewrites a ~100 KB record on every turn) are batched for 60 seconds and only the latest version is copied. As soon as the app's log shows a sign-out or sign-in, everything is synced at once, and nothing is batched between a sign-out and the next sign-in, so every folder is current whenever the app reads one. Only folders of account pairs that have signed in on this PC are kept in sync; folders that never did (for example account × organization combinations created by older versions) are moved into the backup folder (`*-parked`) once they match the others, and a first sign-in there takes the usual first-use path (the folder is filled and you are asked to restart Claude once). When switching accounts the app sometimes initializes the previous account with the new organization for a few seconds before the real sign-in; such pass-through pairs do not count as sign-ins, their folders are left empty and later parked, so the first sign-in of a new pair is watched for 30 seconds before it is filled. It lets the newest version of a file win, skips the app's short-lived `*.tmp` files, and never revives a session the app deleted. Cowork sessions (`local-agent-mode-sessions`) are mirrored the same way. It never reads, changes or deletes your conversations, sends nothing over the internet, and does not read passwords or login tokens. Regular chat conversations live on Anthropic's servers per account and are not affected.
 
 **Why not a junction?** The app refuses to save sessions into a folder that is a junction or symlink. Its log says `Refusing non-directory at private dir path (symlink/file plant)`. So the tool mirrors real folders instead.
 

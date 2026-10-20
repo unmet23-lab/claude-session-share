@@ -12,14 +12,19 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = process.env.CLAUDE_SESSION_SHARE_SCRIPT || path.join(HERE, "..", "claude-session-share.mjs");
 const ORG = "0000000a-0000-4000-8000-00000000000f";
-const ACCT = { A: "aaaaaaaa-0000-4000-8000-000000000001", B: "bbbbbbbb-0000-4000-8000-000000000002", C: "cccccccc-0000-4000-8000-000000000003" };
+const ACCT = { A: "aaaaaaaa-0000-4000-8000-000000000001", B: "bbbbbbbb-0000-4000-8000-000000000002", C: "cccccccc-0000-4000-8000-000000000003", D: "dddddddd-0000-4000-8000-000000000004" };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const initLine = (acct, existing = 0) =>
-  `2026-10-20 08:50:58 [info] [LocalSessionManager] Initialization succeeded — accountId=${acct}, orgId=${ORG}, existingSessions=${existing}\n`;
-const loadedLine = (acct, n) =>
-  `2026-10-20 08:50:58 [info] Loaded ${n} persisted sessions from C:\\Users\\me\\AppData\\Roaming\\Claude\\claude-code-sessions\\${acct}\\${ORG}\n`;
+// 앱 기록 줄. 로그인 줄이 30초 안에 다른 짝 로그인 줄로 이어지면 「지나가는 로그인」이라 시각을 일부러 떨어뜨린다.
+const initLine = (acct, existing = 0, at = "2026-10-20 08:50:58") =>
+  `${at} [info] [LocalSessionManager] Initialization succeeded — accountId=${acct}, orgId=${ORG}, existingSessions=${existing}\n`;
+const loadedLine = (acct, n, at = "2026-10-20 08:52:00") =>
+  `${at} [info] Loaded ${n} persisted sessions from C:\\Users\\me\\AppData\\Roaming\\Claude\\claude-code-sessions\\${acct}\\${ORG}\n`;
 const logoutLine = () => "2026-10-20 08:59:00 [info] [LocalSessionManager] Account logged out, marking for re-init on next login\n";
+// B와 A가 차례로 로그인한 기록(1분 넘게 떨어져 둘 다 진짜 로그인, 지금 계정은 A)
+const twoLogins = () => initLine(ACCT.B, 0, "2026-10-20 08:50:58") + initLine(ACCT.A, 0, "2026-10-20 08:52:30");
+// 이 PC 시각으로 「YYYY-MM-DD HH:MM:SS」(지켜보기 시험에서 지금 일어난 로그인처럼 쓰려고)
+const stamp = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
 
 function setup(name, who = ["A", "B"]) {
   const root = path.join(HERE, "..", ".test-tmp", `eff-${name}`);
@@ -92,7 +97,7 @@ const linesSince = (text, since) => text.split("\n").filter((l) => l && Date.par
 test("고쳐 쓴 세션 기록은 모았다가 마지막 판만 한 번 옮기고, 새 기록은 바로 옮긴다", async (t) => {
   const s = setup("batch");
   t.after(() => s.stop());
-  s.log(initLine(ACCT.B) + initLine(ACCT.A)); // 둘 다 로그인한 적 있는 짝, 지금 계정은 A
+  s.log(twoLogins()); // 둘 다 로그인한 적 있는 짝, 지금 계정은 A
   s.put("A", "local_b1.json", { v: 1 });
   s.start({ CLAUDE_SESSION_SHARE_BATCH_MS: "4000" });
   assert.ok(await waitFor(() => s.read("B", "local_b1.json")?.v === 1), "켜자마자 한 번 다 맞춘다");
@@ -113,7 +118,7 @@ test("고쳐 쓴 세션 기록은 모았다가 마지막 판만 한 번 옮기�
 test("로그아웃 줄을 보면 모으던 것을 바로 옮겨 다음 계정 폴더가 최신이 되고, 다시 로그인하면 또 모은다", async (t) => {
   const s = setup("logout");
   t.after(() => s.stop());
-  s.log(initLine(ACCT.B) + initLine(ACCT.A));
+  s.log(twoLogins());
   s.put("A", "local_l1.json", { v: 1 });
   s.start({ CLAUDE_SESSION_SHARE_BATCH_MS: "30000" });
   assert.ok(await waitFor(() => s.read("B", "local_l1.json")?.v === 1));
@@ -138,7 +143,7 @@ test("로그아웃 줄을 보면 모으던 것을 바로 옮겨 다음 계정 �
 test("로그아웃 줄 없이 다른 계정의 로그인 줄이 보여도 기다리지 않고 바로 전부 맞춘다", async (t) => {
   const s = setup("login");
   t.after(() => s.stop());
-  s.log(initLine(ACCT.B) + initLine(ACCT.A));
+  s.log(twoLogins());
   s.put("A", "local_g1.json", { v: 1 });
   s.start({ CLAUDE_SESSION_SHARE_BATCH_MS: "30000" });
   assert.ok(await waitFor(() => s.read("B", "local_g1.json")?.v === 1));
@@ -154,7 +159,7 @@ test("로그아웃 줄 없이 다른 계정의 로그인 줄이 보여도 기다
 test("로그인 기록이 없는 짝 폴더는 먼저 합친 뒤 쉬게 하고, 그 짝으로 처음 로그인하면 채우고 「껐다 켜기」를 알린다", () => {
   const s = setup("park", ["A", "B", "C"]);
   const env = { CLAUDE_SESSION_SHARE_PARK_MIN_AGE_MS: "0" };
-  s.log(initLine(ACCT.B) + initLine(ACCT.A)); // C는 로그인한 적이 없다
+  s.log(twoLogins()); // C는 로그인한 적이 없다
   s.put("A", "local_p1.json", { sessionId: "local_p1", cliSessionId: "11111111-1111-4111-8111-111111111111" });
   s.put("C", "local_c1.json", { sessionId: "local_c1", cliSessionId: "22222222-2222-4222-8222-222222222222" }, 900);
   s.run("--once", env);
@@ -196,15 +201,15 @@ test("앱 기록을 못 읽었거나, 만든 지 얼마 안 됐거나, 넘어간
   assert.ok(s.has("C", "local_n1.json"), "앱 기록을 못 읽으면 쉬게 하지 않고 그대로 맞춘다");
   // 만든 지 한 시간이 안 됐다(기본값)
   const y = setup("young", ["A", "B", "C"]);
-  y.log(initLine(ACCT.B) + initLine(ACCT.A));
+  y.log(twoLogins());
   y.put("A", "local_y1.json", { sessionId: "local_y1", cliSessionId: "55555555-5555-4555-8555-555555555555" });
   y.run();
   y.run();
   assert.ok(y.has("C", "local_y1.json"), "앱이 막 만들었을 수 있는 폴더는 쉬게 하지 않는다");
   // 넘어간 앱 기록(main1.log)에 C의 로그인이 있다
   const o = setup("rotated", ["A", "B", "C"]);
-  o.log(initLine(ACCT.B) + initLine(ACCT.A));
-  fs.writeFileSync(path.join(o.logs, "main1.log"), initLine(ACCT.C) + loadedLine(ACCT.C, 3));
+  o.log(twoLogins());
+  fs.writeFileSync(path.join(o.logs, "main1.log"), initLine(ACCT.C, 0, "2026-10-19 21:00:00") + loadedLine(ACCT.C, 3, "2026-10-19 21:00:01"));
   o.put("A", "local_o1.json", { sessionId: "local_o1", cliSessionId: "66666666-6666-4666-8666-666666666666" });
   o.run("--once", { CLAUDE_SESSION_SHARE_PARK_MIN_AGE_MS: "0" });
   o.run("--once", { CLAUDE_SESSION_SHARE_PARK_MIN_AGE_MS: "0" });
@@ -214,7 +219,7 @@ test("앱 기록을 못 읽었거나, 만든 지 얼마 안 됐거나, 넘어간
 test("바뀐 것이 없으면 상태 파일을 쓰지 않고, 우리가 옮겨 쓴 폴더를 다시 훑지 않는다", async (t) => {
   const s = setup("idle");
   t.after(() => s.stop());
-  s.log(initLine(ACCT.B) + initLine(ACCT.A));
+  s.log(twoLogins());
   s.put("A", "local_i1.json", { v: 1 });
   s.start({ CLAUDE_SESSION_SHARE_BATCH_MS: "1500", CLAUDE_SESSION_SHARE_VERBOSE: "1" });
   assert.ok(await waitFor(() => s.read("B", "local_i1.json") && fs.existsSync(s.statePath)), "켜자마자 맞추고 상태를 남긴다");
@@ -242,4 +247,74 @@ test("바뀐 것이 없으면 상태 파일을 쓰지 않고, 우리가 옮겨 �
   const scans = after.filter((l) => l.includes(" 훑기 "));
   assert.ok(scans.length >= 1);
   assert.ok(scans.every((l) => !l.includes("bbbbbbbb/")), `B를 다시 훑으면 안 된다:\n${after.join("\n")}`);
+});
+
+// B로 일하다 로그아웃 → 앱이 C 짝을 4초 거친 뒤 A로 로그인한 기록(C는 지나가는 로그인)
+const passingLogins = () =>
+  initLine(ACCT.B, 0, "2026-10-20 08:00:00") + "2026-10-20 08:30:00 [info] [LocalSessionManager] Account logged out, marking for re-init on next login\n" +
+  initLine(ACCT.C, 40, "2026-10-20 08:31:00") + initLine(ACCT.A, 40, "2026-10-20 08:31:04") + loadedLine(ACCT.A, 1, "2026-10-20 08:31:05");
+
+test("앱이 계정을 바꾸며 몇 초만 거친 짝은 로그인 기록으로 치지 않아, 그 빈 폴더를 채우지 않고 나중에 쉬게 한다", () => {
+  const s = setup("transient", ["A", "B", "C"]);
+  s.log(passingLogins());
+  s.put("A", "local_t1.json", { sessionId: "local_t1", cliSessionId: "77777777-7777-4777-8777-777777777777" });
+  fs.writeFileSync(path.join(s.dir("C"), "scheduled-tasks.json"), JSON.stringify({ scheduledTasks: [] })); // 앱이 거치며 쓴 빈 예약 목록
+  s.run();
+  assert.ok(s.has("B", "local_t1.json"), "진짜 로그인한 B는 맞춘다");
+  assert.ok(!s.has("C", "local_t1.json"), "몇 초만 거친 C의 빈 폴더는 채우지 않는다");
+  assert.match(s.shareLog(), /cccccccc\/0000000a: 앱이 계정을 바꾸며 4초만 거친 짝/);
+  let out = s.run("--status");
+  assert.match(out, /○ 2곳이 모두 같습니다\(세션 1개\)/, "판정에서 뺀다");
+  assert.match(out, /cccccccc-0000-4000-8000-000000000003\/0000000a-0000-4000-8000-00000000000f  \(앱이 계정을 바꾸며 잠깐 거친 짝/);
+  s.run("--once", { CLAUDE_SESSION_SHARE_PARK_MIN_AGE_MS: "0" });
+  assert.ok(!fs.existsSync(s.dir("C")), "맞출 것이 없으니 합치지 않고 바로 쉬게 한다");
+  out = s.run("--status");
+  assert.match(out, /쉬는 짝 폴더 1곳/);
+});
+
+test("이전 판이 알려진 짝으로 넣어 둔 지나가는 로그인 짝은 켤 때 빼고 쉬게 한다", () => {
+  const s = setup("demote", ["A", "B", "C"]);
+  s.log(passingLogins());
+  s.put("A", "local_m1.json", { sessionId: "local_m1", cliSessionId: "88888888-8888-4888-8888-888888888888" });
+  s.run();
+  // 이전 판이 남긴 모습: C도 알려진 짝이고 다른 폴더와 맞춰져 있다.
+  fs.copyFileSync(path.join(s.dir("A"), "local_m1.json"), path.join(s.dir("C"), "local_m1.json"));
+  const state = JSON.parse(fs.readFileSync(s.statePath, "utf8"));
+  state.known[`${ACCT.C}/${ORG}`] = "2026-10-17T05:56:29.001Z";
+  delete state.transient;
+  state.synced["claude-code-sessions"].push(s.dir("C"));
+  fs.writeFileSync(s.statePath, JSON.stringify(state));
+  s.run("--once", { CLAUDE_SESSION_SHARE_PARK_MIN_AGE_MS: "0" });
+  assert.match(s.shareLog(), /몇 초만 거친 짝 1곳을 로그인 기록에서 뺌\(cccccccc\/0000000a\)/);
+  assert.ok(!fs.existsSync(s.dir("C")), "알려진 짝에서 빠지고 맞춰져 있으니 쉬게 한다");
+  assert.ok(s.has("B", "local_m1.json"), "진짜 로그인한 짝은 그대로 맞춘다");
+  const after = JSON.parse(fs.readFileSync(s.statePath, "utf8"));
+  assert.equal(after.known[`${ACCT.C}/${ORG}`], undefined);
+});
+
+test("처음 쓰는 짝의 로그인은 지나가는 로그인인지 몇 초 지켜본 뒤 채우고 알리고, 지나가는 로그인은 채우지도 알리지도 않는다", async (t) => {
+  const s = setup("pending");
+  t.after(() => s.stop());
+  s.log(twoLogins());
+  s.put("A", "local_n1.json", { sessionId: "local_n1", cliSessionId: "99999999-9999-4999-8999-999999999999" });
+  s.start({ CLAUDE_SESSION_SHARE_BATCH_MS: "30000", CLAUDE_SESSION_SHARE_TRANSIENT_MS: "4000" });
+  assert.ok(await waitFor(() => s.read("B", "local_n1.json")));
+  await sleep(1500);
+  // 진짜 첫 로그인: 앱이 C 폴더를 새로 만들고 세션 0개를 읽는다.
+  fs.mkdirSync(s.dir("C"), { recursive: true });
+  s.log(initLine(ACCT.C, 0, stamp()) + loadedLine(ACCT.C, 0, stamp()));
+  await sleep(1500);
+  assert.ok(!s.has("C", "local_n1.json"), "지나가는 로그인인지 판정하기 전에는 채우지 않는다");
+  assert.ok(await waitFor(() => s.has("C", "local_n1.json"), 10000), "판정한 뒤 채운다");
+  assert.ok(await waitFor(() => /한 번만 껐다 켜/.test(s.notes()), 5000), "빈 목록을 읽었으니 껐다 켜기를 알린다");
+  // 지나가는 로그인: D 짝을 1초 거쳐 A로
+  const notes = s.notes();
+  fs.mkdirSync(s.dir("D"), { recursive: true });
+  s.log(initLine(ACCT.D, 9, stamp()) + loadedLine(ACCT.D, 0, stamp()));
+  await sleep(1000);
+  s.log(initLine(ACCT.A, 9, stamp()) + loadedLine(ACCT.A, 2, stamp()));
+  await sleep(6000);
+  assert.ok(!s.has("D", "local_n1.json"), "지나가는 로그인 짝의 빈 폴더는 채우지 않는다");
+  assert.equal(s.notes(), notes, "지나가는 로그인에는 알리지 않는다");
+  assert.match(s.shareLog(), /dddddddd\/0000000a: 앱이 계정을 바꾸며 \d+초만 거친 짝/);
 });
