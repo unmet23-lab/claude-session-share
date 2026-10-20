@@ -124,6 +124,7 @@ test("로그아웃 줄을 보면 모으던 것을 바로 옮겨 다음 계정 �
   s.log(logoutLine());
   // 앱은 다음 계정으로 로그인할 때 그 계정 폴더를 읽는다. 그 전에(로그아웃 줄을 본 즉시) 최신이어야 한다.
   assert.ok(await waitFor(() => s.read("B", "local_l1.json")?.v === 2, 3000), "로그아웃 줄을 보면 기다리지 않고 옮긴다");
+  assert.match(s.shareLog(), /로그아웃 줄을 봄/, "기록에 왜 바로 맞췄는지 남긴다");
   s.put("A", "local_l1.json", { v: 3 }, 0);
   assert.ok(await waitFor(() => s.read("B", "local_l1.json")?.v === 3, 3000), "로그아웃 뒤 다음 로그인까지는 모으지 않는다");
   s.log(initLine(ACCT.B, 0) + loadedLine(ACCT.B, 1));
@@ -147,6 +148,7 @@ test("로그아웃 줄 없이 다른 계정의 로그인 줄이 보여도 기다
   assert.equal(s.read("B", "local_g1.json")?.v, 1);
   s.log(initLine(ACCT.B, 0) + loadedLine(ACCT.B, 1));
   assert.ok(await waitFor(() => s.read("B", "local_g1.json")?.v === 2, 3000), "로그인 줄을 보면 바로 맞춘다");
+  assert.match(s.shareLog(), /로그인 줄을 봄\(bbbbbbbb\/0000000a\)/);
 });
 
 test("로그인 기록이 없는 짝 폴더는 먼저 합친 뒤 쉬게 하고, 그 짝으로 처음 로그인하면 채우고 「껐다 켜기」를 알린다", () => {

@@ -780,6 +780,8 @@ function tick(ctx, opts = {}) {
   if (ev.logout) ctx.loggedOutAt = now; else if (ev.inits.length) ctx.loggedOutAt = 0;
   const logEvent = ev.inits.length > 0 || ev.loaded.length > 0 || ev.logout;
   if (logEvent) markState(ctx, true); // 읽은 자리를 곧바로 남긴다(다시 켰을 때 같은 줄로 두 번 알리지 않게)
+  if (ev.logout) log("로그아웃 줄을 봄 — 기다리지 않고 바로 전부 맞춤(다음 로그인까지는 모으지 않음)");
+  else if (ev.inits.length) log(`로그인 줄을 봄(${short(state.active)}) — 기다리지 않고 바로 전부 맞춤`);
   if (now - (ctx.lastConfigScan || 0) >= CONFIG_SCAN_MS) {
     ctx.lastConfigScan = now;
     for (const key of pairsFromConfigs()) if (seen(key)) newPair = true;
