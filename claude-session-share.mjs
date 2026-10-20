@@ -7,6 +7,12 @@
 // 짝 폴더를 junction(연결 폴더)으로 묶으면 앱이 쓰기를 거부한다 — main.log 「Refusing non-directory at private dir path (symlink/file plant)」,
 // 앱이 lstat·realpath로 reparse point를 막기 때문이다. 그래서 연결은 전혀 쓰지 않는다:
 //   - 모든 짝 폴더를 실제 폴더로 두고(남은 junction은 실제 폴더로 바꾼다), 어느 한 폴더의 변화(추가·수정·삭제)를 나머지 전부에 옮긴다.
+//   - 새로 생긴 파일과 지운 파일은 바로 옮긴다. 이미 있는 파일을 고쳐 쓴 것(앱이 세션 기록을 차례마다 다시 쓴다)은 1분씩 모아
+//     파일마다 마지막 판만 옮긴다. 앱 기록(main.log)에 로그인·로그아웃 줄이 보이면 기다리지 않고 바로 전부 맞추고,
+//     로그아웃 뒤 다음 로그인까지는 모으지 않는다 — 앱은 로그인할 때만 폴더를 읽으므로 계정을 바꿀 때 모든 폴더가 최신이다.
+//   - 맞추는 대상은 앱이 로그인한 적 있는 짝(main.log 기록·터미널 로그인 파일)뿐이다. 로그인 기록이 없는 짝 폴더(옛 판이 계정×조직
+//     조합으로 만들어 둔 것 등)는 다른 폴더와 맞춰진 상태로 백업 폴더로 옮겨 쉬게 한다. 그 짝으로 처음 로그인하면 앱이 빈 폴더를
+//     새로 만들어 읽으므로, 처음 쓰는 계정과 같은 길(채우고 「껐다 켜기」 알림)로 맞춰진다.
 //   - 같은 파일이 폴더마다 다르면 더 최근(mtime) 것이 이긴다. 삭제는 「지난번엔 있었는데 없어진」 폴더에서만 읽어 전파한다.
 //   - 세션 기록(local_*.json)은 삭제 표식(deleted_<CLI 세션ID>)이 어디든 있으면 지운 것으로 보고 되살리지 않는다.
 //   - 예약 작업 목록(scheduled-tasks.json)만은 파일째 맞추지 않고 작업(id)마다 합친다. 앱은 로그인할 때마다 목록을 다시 쓰고
@@ -35,13 +41,28 @@ const LOG_PATH = path.join(DATA_DIR, "claude-session-share.log");
 const PID_PATH = path.join(DATA_DIR, "claude-session-share.pid");
 const BACKUP_DIR = path.join(DATA_DIR, "claude-session-backups");
 const TREES = ["claude-code-sessions", "local-agent-mode-sessions"];
+const envMs = (name, def) => { const raw = process.env[name], v = Number(raw); return raw && raw.trim() && Number.isFinite(v) && v >= 0 ? v : def; };
 const POLL_MS = 1000;
 const WATCH_DEBOUNCE_MS = 150;
+// 이미 있는 파일을 고쳐 쓴 것은 이만큼 모아 옮긴다(새 파일·지운 파일·로그인·로그아웃은 바로). 앱이 세션 기록(약 100KB)을
+// 차례마다 다시 써서, 바뀔 때마다 모든 폴더에 옮기면 한 시간에 수 GB를 쓴다(2026-10-20 8시간 87,556번 복사).
+const BATCH_MS = envMs("CLAUDE_SESSION_SHARE_BATCH_MS", 60000);
+// 로그아웃 줄을 본 뒤 다음 로그인까지(길어야 10분)는 모으지 않는다 — 언제 다른 계정으로 로그인할지 모른다.
+const LOGGED_OUT_FAST_MS = 10 * 60000;
 const FULL_SCAN_MS = 5 * 60000;
 const CONFIG_SCAN_MS = 60000;
 const SNAPSHOT_MS = 3600000;
 const SNAPSHOT_KEEP = 24;
 const STATE_WRITE_DEBOUNCE_MS = 2000;
+// 상태 파일(수백 KB)은 로그인·로그아웃처럼 중요한 것이 바뀌면 2초 안에, 맞춘 파일 목록만 바뀌었으면 1분에 한 번까지만 쓴다.
+// 목록이 조금 낡아도 다시 켤 때 삭제를 잘못 읽지 않는다(없는 것만 지운 것으로 보는데, 그사이 지운 것은 이미 모든 폴더에서 지워졌다).
+const STATE_WRITE_MIN_MS = 60000;
+// 방금 내가 쓰거나 지운 파일의 감시 알림은 이 시간 안이면 무시한다(그 폴더를 다시 훑지 않게).
+const OWN_WRITE_TTL_MS = 10000;
+// 로그인 기록이 없는 짝 폴더는 만든 지 이만큼 지나고 다른 폴더와 맞춰진 뒤에만 쉬게 한다(앱이 막 만든 폴더는 건드리지 않는다).
+const PARK_MIN_AGE_MS = envMs("CLAUDE_SESSION_SHARE_PARK_MIN_AGE_MS", 3600000);
+const PARK_RETRY_MS = 3600000;
+const VERBOSE = !!process.env.CLAUDE_SESSION_SHARE_VERBOSE;
 const LOG_FIRST_READ_MAX = 8 * 1024 * 1024;
 const LOG_FILE_MAX = 512 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -171,11 +192,13 @@ function findMainLog() {
 
 /* ---------- 계정 짝 찾기 ---------- */
 // 로그에서 새로 나온 줄을 읽어 로그인 짝·「Loaded N persisted sessions」·로그아웃을 모은다.
+// ok: 앱 기록을 실제로 찾아 읽었다(로그인 기록이 없는 짝을 쉬게 할지는 이때만 판단한다).
 function readLogEvents(state, logPath) {
-  const out = { inits: [], loaded: [], logout: false };
+  const out = { inits: [], loaded: [], logout: false, ok: false };
   if (!logPath) return out;
   let size;
   try { size = fs.statSync(logPath).size; } catch { return out; }
+  out.ok = true;
   if (state.logPath !== logPath || size < (state.logOffset || 0)) { state.logPath = logPath; state.logOffset = 0; }
   if (size === state.logOffset) return out;
   const start = Math.max(state.logOffset, size - LOG_FIRST_READ_MAX);
@@ -200,6 +223,21 @@ function readLogEvents(state, logPath) {
     else out.logout = true;
   }
   return out;
+}
+
+// 넘어간 앱 기록(main1.log…)까지 모두 읽어 로그인한 짝을 모은다. 로그인 기록이 없는 짝 폴더는 쉬게 하므로, 기록이 넘어가며
+// 잘려 나간 옛 로그인도 놓치지 않게 켤 때 한 번 읽는다(짝만 배우고 알림 같은 일은 하지 않는다).
+function pairsFromAllLogs(logPath) {
+  const keys = new Set();
+  const dir = path.dirname(logPath);
+  for (const n of safeReaddir(dir)) {
+    if (!/^main\d*\.log$/i.test(n)) continue;
+    let text;
+    try { text = fs.readFileSync(path.join(dir, n), "utf8"); } catch { continue; }
+    for (const m of text.matchAll(INIT_LINE)) keys.add(pairKey(m[1], m[2]));
+    for (const m of text.matchAll(LOADED_LINE)) if (UUID.test(m[3]) && UUID.test(m[4])) keys.add(pairKey(m[3], m[4]));
+  }
+  return keys;
 }
 
 // 터미널 claude 로그인 파일에서도 짝을 안다(앱에서 아직 로그인하지 않은 계정의 폴더를 미리 채워 둔다).
@@ -270,6 +308,38 @@ function copyFile(src, dst, st, pair) {
 }
 
 const newer = (a, b) => !b || a.m > b.m || (a.m === b.m && a.s !== b.s);
+const sameEntry = (a, b) => !!a && !!b && a.m === b.m && a.s === b.s;
+
+// 방금 내가 쓰거나(st) 지운(st 없음) 파일을 적어 둔다. 그 폴더의 감시가 이 쓰기로 깨어나도 다시 훑지 않게 한다.
+function rememberOwn(ctx, d, rel, st) {
+  (ctx.own ||= new Map()).set(`${lower(d)}|${rel}`, { m: st ? st.m : -1, s: st ? st.s : -1, at: Date.now() });
+}
+
+// 바뀐 폴더를 적어 둔다. 새 파일·지운 파일(urgent)은 곧바로, 고쳐 쓴 파일은 BATCH_MS 동안 모았다가 맞춘다.
+function markDirty(ctx, d, urgent) {
+  ctx.dirty.add(lower(d));
+  if (!ctx.dirtySince) ctx.dirtySince = Date.now();
+  if (urgent) { ctx.urgent = true; scheduleTick(ctx, WATCH_DEBOUNCE_MS); }
+}
+
+// 짝 폴더 감시 알림. 임시 이름(앱의 .tmp…, 우리의 .mirror-…), 예약 목록(매 바퀴 크기·시각으로 본다), 하위 폴더 자체,
+// 방금 내가 쓴 그대로인 파일은 건너뛴다. 예전에는 알림마다 그 폴더를 바뀐 것으로 쳐서, 우리가 28곳에 복사하면
+// 28곳의 감시가 다시 깨어나 다음 바퀴에 29곳을 모두 훑었다.
+function onWatch(ctx, tree, d, name) {
+  if (!name) { markDirty(ctx, d, true); return; }
+  const rel = String(name).split(/[\\/]/).join("/");
+  if (isTempName(path.basename(rel)) || rel === REGISTRY) return;
+  let st = null;
+  try {
+    const s = fs.statSync(path.join(d, rel));
+    if (s.isDirectory()) return;
+    st = { m: Math.round(s.mtimeMs), s: s.size };
+  } catch {}
+  const own = ctx.own?.get(`${lower(d)}|${rel}`);
+  if (own && Date.now() - own.at < OWN_WRITE_TTL_MS && (st ? st.m === own.m && st.s === own.s : own.s === -1)) return;
+  // 지운 파일, 아직 맞춘 적 없는 새 파일은 바로. 이미 맞춘 파일을 고쳐 쓴 것은 모아서.
+  markDirty(ctx, d, !st || !ctx.state.union[tree]?.[rel]);
+}
 
 /* ---------- 미러 ---------- */
 // ctx.manifests[tree]: Map(dir → Map(rel → {m,s}))  지난번 맞춘 뒤 각 폴더가 가진 것
@@ -293,6 +363,7 @@ function syncTree(ctx, tree, opts = {}) {
   const dirtyAll = opts.full || !ctx.fullScanned[tree];
   const toScan = dirs.filter((d) => dirtyAll || ctx.dirty.has(lower(d)));
   if (toScan.length === 0) return { copied: 0, removed: 0 };
+  if (VERBOSE) log(`훑기 ${tree}: ${toScan.length}곳 (${toScan.map((d) => short(dirPair(d))).join(" ")})${dirtyAll ? " 전체" : ""}`);
   const scans = new Map();
   for (const d of toScan) scans.set(d, scanDir(d, manifests.get(d)));
 
@@ -337,7 +408,7 @@ function syncTree(ctx, tree, opts = {}) {
     }
   }
 
-  let copied = 0, removed = 0, failed = 0;
+  let copied = 0, removed = 0, failed = 0, changed = false;
   for (const [rel, u] of upserts) {
     const src = path.join(u.src, rel);
     for (const d of dirs) {
@@ -345,34 +416,41 @@ function syncTree(ctx, tree, opts = {}) {
       const cur = (scans.get(d) || manifests.get(d))?.get(rel) || (scans.has(d) || manifests.has(d) ? null : union[rel]);
       if (!newer(u, cur)) continue;
       try { copyFile(src, path.join(d, rel), u, d); copied++; }
-      catch (e) { failed++; ctx.dirty.add(lower(u.src)); if (kind(d) !== "dir") ctx.rootsMoved = true; log(`${path.basename(path.dirname(d))}/${short(path.basename(d))} ← ${rel} 복사 실패: ${e.code || ""} ${e.message}`); continue; }
+      catch (e) { failed++; if (kind(d) !== "dir") ctx.rootsMoved = true; log(`${path.basename(path.dirname(d))}/${short(path.basename(d))} ← ${rel} 복사 실패: ${e.code || ""} ${e.message}`); continue; }
+      rememberOwn(ctx, d, rel, u);
       (scans.get(d) || manifests.get(d))?.set(rel, { m: u.m, s: u.s });
       ctx.dirMtimes?.set(lower(d), mtime(d)); // 우리가 쓴 것 때문에 폴더 mtime 감시가 다시 훑지 않게
     }
-    union[rel] = { m: u.m, s: u.s };
+    if (!sameEntry(union[rel], u)) { union[rel] = { m: u.m, s: u.s }; changed = true; }
     (scans.get(u.src) || manifests.get(u.src))?.set(rel, { m: u.m, s: u.s });
   }
   for (const rel of deletes) {
-    if (rel === REGISTRY) { delete union[rel]; continue; } // 옛 상태에 남은 목록 줄 때문에 파일을 지우지 않는다
+    if (rel === REGISTRY) { if (rel in union) { delete union[rel]; changed = true; } continue; } // 옛 상태에 남은 목록 줄 때문에 파일을 지우지 않는다
     for (const d of dirs) {
       const p = path.join(d, rel);
       if (kind(p) !== "file") continue;
       try { fs.unlinkSync(p); removed++; } catch (e) { failed++; log(`${rel} 삭제 실패(${short(path.basename(d))}): ${e.code || ""} ${e.message}`); continue; }
+      rememberOwn(ctx, d, rel, null);
       (scans.get(d) || manifests.get(d))?.delete(rel);
       ctx.dirMtimes?.set(lower(d), mtime(d));
     }
-    delete union[rel];
+    if (rel in union) { delete union[rel]; changed = true; }
   }
   for (const [d, scan] of scans) { manifests.set(d, scan); ctx.dirty.delete(lower(d)); }
+  // 실패한 복사·삭제(백신·색인기가 파일을 잠깐 쥐고 있었다 등)는 잠시 뒤 전체 대조로 다시 한다(tick의 retryAt).
+  if (failed) ctx.fullScanned[tree] = false;
+  const before = (state.synced[tree] || []).map(lower).sort().join("|");
   if (dirtyAll && failed === 0) { ctx.fullScanned[tree] = true; state.synced[tree] = dirs.slice(); }
   else if (failed === 0) state.synced[tree] = [...new Set([...(state.synced[tree] || []), ...dirs])];
+  if ((state.synced[tree] || []).map(lower).sort().join("|") !== before) changed = true;
   if (copied || removed || failed) {
     // 바뀐 파일이 몇 개뿐이면 이름도 남긴다(어떤 세션이 사라졌는지 나중에 찾을 수 있게).
     const names = [...upserts.keys()].map((r) => `+${r}`).concat([...deletes].map((r) => `-${r}`));
     log(`${tree}: ${toScan.length}곳 확인, ${copied}개 복사, ${removed}개 삭제${failed ? `, ${failed}개 실패(다시 시도)` : ""}${names.length && names.length <= 5 ? ` [${names.join(" ")}]` : ""}`);
   }
-  ctx.stateDirty = true;
-  return { copied, removed };
+  // 맞춘 파일 목록이 실제로 바뀌었을 때만 상태 파일을 쓴다(예전에는 훑기만 해도 2초마다 340KB를 다시 썼다).
+  if (changed) markState(ctx, false);
+  return { copied, removed, failed };
 }
 
 /* ---------- 예약 작업 목록 ---------- */
@@ -419,6 +497,13 @@ function syncRegistry(ctx, tree, inits = []) {
   const all = (state.tasks ||= {});
   const fresh = !all[tree];
   const R = (all[tree] ||= { union: {}, order: [], known: {}, dirs: {} });
+  // 매 초 도는 바퀴라 먼저 크기·시각만 본다. 새 로그인도 없고 모든 폴더의 목록이 지난번 그대로면 읽지 않는다.
+  if (!fresh && !inits.length && dirs.every((d) => {
+    let st;
+    try { st = fs.statSync(path.join(d, REGISTRY)); } catch { return false; }
+    const prev = R.dirs[lower(d)];
+    return !!prev && prev.m === Math.round(st.mtimeMs) && prev.s === st.size;
+  })) return;
   const now = new Map();
   for (const d of dirs) now.set(d, readRegistry(d));
   const dirOf = (key) => dirs.find((x) => dirPair(x) === key);
@@ -499,7 +584,7 @@ function syncRegistry(ctx, tree, inits = []) {
     ctx.lastRestoreNote = Date.now();
     notify("Claude 세션 공유", `예약 작업 ${mine.length}개가 이 계정 목록에서 빠져 다시 넣었어요. Claude를 한 번 껐다 켜면 다시 돌아요.`);
   }
-  ctx.stateDirty = true;
+  if (changed.length || inits.length || wrote || fresh) markState(ctx, false);
 }
 
 /* ---------- 짝 폴더 준비 ---------- */
@@ -520,6 +605,33 @@ function ensureRealDir(p) {
   return true;
 }
 
+// 로그인 기록이 없는 짝 폴더를 쉬게 해도 되는지. 앱 기록을 읽은 뒤에만, 다른 폴더와 맞춰진 폴더만(합치기 전이면 먼저 합친다),
+// 만든 지 PARK_MIN_AGE_MS가 지난 폴더만(앱이 막 만든 폴더는 건드리지 않는다), 넘어간 앱 기록에도 그 짝이 없을 때만.
+function parkable(ctx, tree, d, key) {
+  const { state } = ctx;
+  if (!ctx.logSeen || key === state.active || state.known[key] || ctx.loggedPairs?.has(key)) return false;
+  if (Date.now() < (ctx.parkRetryAt?.get(lower(d)) || 0)) return false;
+  if (!(state.synced[tree] || []).some((s) => lower(s) === lower(d))) return false;
+  let born = 0;
+  try { born = fs.statSync(d).birthtimeMs; } catch { return false; }
+  return born > 0 && Date.now() - born >= PARK_MIN_AGE_MS;
+}
+
+// 짝 폴더를 백업 폴더(<날짜-시각>-parked\<트리>\<계정>\<조직>)로 옮긴다. 같은 드라이브라 이름만 바뀐다.
+// 그 짝으로 앱이 처음 로그인하면 빈 폴더를 새로 만들어 읽으므로 「처음 쓰는 계정」 길(채우고 껐다 켜기 알림)로 맞춰진다.
+function parkDir(ctx, tree, d, key, stamp) {
+  const to = path.join(BACKUP_DIR, `${stamp}-parked`, tree, path.basename(path.dirname(d)), path.basename(d));
+  closeWatcher(ctx, tree, d); // 감시가 폴더를 쥐고 있으면 이름 바꾸기가 EPERM으로 막힌다
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  fs.renameSync(d, to);
+  ((ctx.state.parked ||= {})[tree] ||= {})[key] = { at: new Date().toISOString(), to };
+  ctx.manifests[tree]?.delete(d);
+  ctx.dirty.delete(lower(d));
+  if (ctx.state.synced[tree]) ctx.state.synced[tree] = ctx.state.synced[tree].filter((s) => lower(s) !== lower(d));
+  markState(ctx, true);
+  return to;
+}
+
 function refreshFamily(ctx) {
   const { state } = ctx;
   const roots = findRoots();
@@ -533,13 +645,30 @@ function refreshFamily(ctx) {
   }
   ctx.primary = primary;
   ctx.family = {};
+  const stamp = secStamp();
   for (const tree of TREES) {
     const dirs = [];
     const keys = new Set();
-    for (const r of roots) for (const key of pairsFromDirs(path.join(r, tree))) { keys.add(key); dirs.push(path.join(r, tree, ...key.split("/"))); }
-    for (const key of Object.keys(state.known)) if (!keys.has(key) && kind(path.join(primary, tree)) === "dir") dirs.push(path.join(primary, tree, ...key.split("/")));
+    for (const r of roots) for (const key of pairsFromDirs(path.join(r, tree))) { keys.add(key); dirs.push({ d: path.join(r, tree, ...key.split("/")), key }); }
+    for (const key of Object.keys(state.known)) if (!keys.has(key) && kind(path.join(primary, tree)) === "dir") dirs.push({ d: path.join(primary, tree, ...key.split("/")), key });
+    // 쉬던 짝으로 앱이 로그인했다(이제 알려진 짝) — 앱이 새로 만든 빈 폴더를 다른 폴더의 기록으로 채운다.
+    for (const key of Object.keys(state.parked?.[tree] || {})) if (state.known[key]) {
+      delete state.parked[tree][key];
+      markState(ctx, true);
+      log(`${short(key)}: 쉬던 짝으로 로그인함 — ${tree} 맞추는 대상에 다시 넣고 채움`);
+    }
     const ok = [];
-    for (const d of dirs) {
+    for (const { d, key } of dirs) {
+      if (parkable(ctx, tree, d, key)) {
+        try {
+          const to = parkDir(ctx, tree, d, key, stamp);
+          log(`${short(key)}: 로그인 기록이 없는 짝 폴더라 쉬게 함(${tree} 맞추는 대상에서 뺌, 옮긴 곳 ${to})`);
+          continue;
+        } catch (e) {
+          (ctx.parkRetryAt ||= new Map()).set(lower(d), Date.now() + PARK_RETRY_MS);
+          log(`${short(key)}: 쉬게 하지 못해 그대로 맞춤(한 시간 뒤 다시): ${e.code || ""} ${e.message}`);
+        }
+      }
       try {
         const existed = kind(d) === "dir";
         if (!ensureRealDir(d)) continue;
@@ -549,39 +678,52 @@ function refreshFamily(ctx) {
         if (!existed && (state.synced[tree] || []).some((s) => lower(s) === lower(d))) {
           state.synced[tree] = state.synced[tree].filter((s) => lower(s) !== lower(d));
           ctx.manifests[tree]?.delete(d);
-          ctx.stateDirty = true;
+          markState(ctx, false);
           log(`${short(path.basename(path.dirname(d)) + "/" + path.basename(d))}: 사라졌던 짝 폴더를 다시 만듦 — 지운 것으로 치지 않고 채움`);
         }
       } catch (e) { log(`${d} 준비 실패: ${e.code || ""} ${e.message}`); }
     }
     ok.sort();
-    const before = (ctx.family[tree] || ctx.lastFamily?.[tree] || []).map(lower).join("|");
+    const before = (ctx.lastFamily?.[tree] || []).map(lower).join("|");
     ctx.family[tree] = ok;
-    if (ok.map(lower).join("|") !== before) { ctx.fullScanned[tree] = false; resetWatchers(ctx, tree); }
+    if (ok.map(lower).join("|") !== before) ctx.fullScanned[tree] = false;
+    syncWatchers(ctx, tree);
   }
   ctx.lastFamily = ctx.family;
 }
 
-function resetWatchers(ctx, tree) {
-  for (const w of ctx.watchers[tree] || []) { try { w.close(); } catch {} }
-  ctx.watchers[tree] = [];
+// 감시는 짝 폴더마다 하나. 대상에서 빠진 폴더의 감시는 닫고, 새로 든 폴더(또는 오류로 닫힌 감시)는 새로 건다.
+function syncWatchers(ctx, tree) {
+  const have = (ctx.watchers[tree] ||= new Map());
+  const want = new Map((ctx.family[tree] || []).map((d) => [lower(d), d]));
+  for (const [k, w] of have) if (!want.has(k)) { try { w.close(); } catch {} have.delete(k); }
   if (!ctx.daemon) return;
-  for (const d of ctx.family[tree]) {
+  for (const [k, d] of want) {
+    if (have.has(k)) continue;
     try {
-      const w = fs.watch(d, { recursive: true }, () => { ctx.dirty.add(lower(d)); scheduleTick(ctx, WATCH_DEBOUNCE_MS); });
-      w.on("error", () => { ctx.dirty.add(lower(d)); });
-      ctx.watchers[tree].push(w);
+      const w = fs.watch(d, { recursive: true }, (type, name) => onWatch(ctx, tree, d, name));
+      w.on("error", () => { markDirty(ctx, d, true); try { w.close(); } catch {} if (have.get(k) === w) have.delete(k); });
+      have.set(k, w);
     } catch (e) { log(`${short(path.basename(d))} 감시 실패: ${e.code || ""} ${e.message}`); }
   }
+}
+
+function closeWatcher(ctx, tree, d) {
+  const have = ctx.watchers[tree];
+  const w = have?.get(lower(d));
+  if (!w) return;
+  try { w.close(); } catch {}
+  have.delete(lower(d));
 }
 
 /* ---------- 백업 ---------- */
 const dirsByNewest = (dir) => safeReaddir(dir).map((n) => path.join(dir, n)).filter((p) => kind(p) === "dir").sort((a, b) => mtime(b) - mtime(a));
 const snapshotDirs = () => dirsByNewest(BACKUP_DIR).filter((p) => /^\d{8}-\d{2}(\d{4}-[a-z-]+)?$/.test(path.basename(p)));
 
+// 매시간 백업은 기록이 가장 많은 폴더에서 뜬다. 같으면 지금 계정 폴더(앱이 쓰는 곳이라 고쳐 쓴 내용도 가장 최신)를 고른다.
 function fullestDir(ctx) {
   let best = null, n = -1;
-  for (const d of ctx.family["claude-code-sessions"] || []) { const c = countRecords(d); if (c > n) { n = c; best = d; } }
+  for (const d of ctx.family["claude-code-sessions"] || []) { const c = countRecords(d); if (c > n || (c === n && dirPair(d) === ctx.state.active)) { n = c; best = d; } }
   return best;
 }
 
@@ -619,32 +761,63 @@ function snapshotAll(tag) {
 /* ---------- 한 바퀴 ---------- */
 function tick(ctx, opts = {}) {
   const { state } = ctx;
-  const ev = readLogEvents(state, findMainLog());
+  const now = Date.now();
+  // 앱 기록 자리 찾기는 폴더를 여럿 뒤지므로 1분에 한 번만 한다(예전에는 매 초 Packages 폴더 전체를 읽었다).
+  if (ctx.mainLogAt === undefined || now - ctx.mainLogAt >= CONFIG_SCAN_MS) { ctx.mainLogAt = now; ctx.mainLog = findMainLog(); }
+  const ev = readLogEvents(state, ctx.mainLog);
+  if (ev.ok) ctx.logSeen = true;
   // 상태 파일 없이 처음 읽은 기록(설치 직후 첫 맞추기)은 지난 일이라 알리지 않는다. 설치기가 따로 「껐다 켜세요」를 알려 준다.
   const history = ctx.freshState && !ctx.logReadOnce;
   ctx.logReadOnce = true;
-  const seen = (key) => { if (!state.known[key]) { state.known[key] = new Date().toISOString(); ctx.stateDirty = true; return true; } return false; };
+  const seen = (key) => { if (!state.known[key]) { state.known[key] = new Date().toISOString(); markState(ctx, true); return true; } return false; };
   let newPair = false;
-  for (const key of ev.inits) { if (seen(key)) newPair = true; state.active = key; }
-  if (ev.logout) state.active = null;
-  if (Date.now() - (ctx.lastConfigScan || 0) >= CONFIG_SCAN_MS) {
-    ctx.lastConfigScan = Date.now();
+  // 켤 때 한 번, 넘어간 앱 기록(main1.log…)까지 읽어 로그인한 짝을 배운다(로그인 기록이 없는 짝만 쉬게 하므로).
+  if (ev.ok && !ctx.loggedPairs) { ctx.loggedPairs = pairsFromAllLogs(ctx.mainLog); for (const key of ctx.loggedPairs) if (seen(key)) newPair = true; }
+  for (const key of ev.inits) { if (seen(key)) newPair = true; if (state.active !== key) { state.active = key; markState(ctx, true); } }
+  for (const e of ev.loaded) if (seen(e.key)) newPair = true;
+  if (ev.logout && state.active !== null) { state.active = null; markState(ctx, true); }
+  // 로그아웃 뒤 다음 로그인까지는 모으지 않고 바로 옮긴다. 로그인·로그아웃 줄을 보면 기다리지 않고 바로 전부 맞춘다.
+  if (ev.logout) ctx.loggedOutAt = now; else if (ev.inits.length) ctx.loggedOutAt = 0;
+  const logEvent = ev.inits.length > 0 || ev.loaded.length > 0 || ev.logout;
+  if (logEvent) markState(ctx, true); // 읽은 자리를 곧바로 남긴다(다시 켰을 때 같은 줄로 두 번 알리지 않게)
+  if (now - (ctx.lastConfigScan || 0) >= CONFIG_SCAN_MS) {
+    ctx.lastConfigScan = now;
     for (const key of pairsFromConfigs()) if (seen(key)) newPair = true;
   }
   // rootsMoved: 짝 폴더가 통째로 없어졌다(앱이 데이터를 다른 자리로 옮김) — 1분을 기다리지 않고 뿌리를 다시 찾는다.
-  if (newPair || ctx.rootsMoved || !ctx.family || Date.now() - (ctx.lastFamilyScan || 0) >= CONFIG_SCAN_MS) { ctx.lastFamilyScan = Date.now(); ctx.rootsMoved = false; refreshFamily(ctx); }
+  if (newPair || ctx.rootsMoved || !ctx.family || now - (ctx.lastFamilyScan || 0) >= CONFIG_SCAN_MS) { ctx.lastFamilyScan = now; ctx.rootsMoved = false; refreshFamily(ctx); }
   if (!ctx.family) return;
   // 앱이 어떤 짝 폴더에서 세션을 0개 읽었고 메모리에도 없었는데(existingSessions=0) 다른 폴더엔 기록이 있으면, 채운 뒤 「껐다 켜기」를 알린다.
   // 같은 계정 재로그인(existingSessions>0 뒤 「Loaded 0」)은 목록이 이미 보이는 상태라 빈 목록으로 치지 않는다.
   const codeLoads = ev.loaded.filter((e) => e.n === 0 && e.tree === "claude-code-sessions");
   for (const e of codeLoads) if (e.existing > 0) log(`${short(e.key)}: 같은 계정으로 다시 로그인함(목록에 이미 ${e.existing}개) — 알림 없음`);
   const emptyLoads = codeLoads.filter((e) => !(e.existing > 0));
-  const full = opts.full || Date.now() - (ctx.lastFull || 0) >= FULL_SCAN_MS || newPair || emptyLoads.length > 0;
-  if (full) ctx.lastFull = Date.now();
+  const full = opts.full || now - (ctx.lastFull || 0) >= FULL_SCAN_MS || newPair || emptyLoads.length > 0 || logEvent;
+  // 지금 맞출지: 전체 대조·한 번 실행(--once)·새 파일이나 지운 파일·로그아웃 뒤면 바로, 고쳐 쓴 파일만이면 BATCH_MS를 모은 뒤.
+  const fast = ctx.loggedOutAt > 0 && now - ctx.loggedOutAt < LOGGED_OUT_FAST_MS;
+  const retry = ctx.retryAt > 0 && now >= ctx.retryAt;
+  const due = full || !ctx.daemon || retry || (ctx.dirty.size > 0 && (ctx.urgent || fast || now - (ctx.dirtySince || now) >= BATCH_MS));
+  if (due) {
+    if (full) ctx.lastFull = now;
+    ctx.urgent = false;
+    ctx.dirtySince = 0;
+    ctx.retryAt = 0;
+  }
+  let failed = 0;
   for (const tree of TREES) {
-    try { syncTree(ctx, tree, { full }); } catch (e) { log(`${tree} 맞추기 오류: ${e.code || ""} ${e.message}`); for (const d of ctx.family[tree] || []) ctx.dirty.add(lower(d)); }
+    if (due) try { failed += syncTree(ctx, tree, { full }).failed || 0; } catch (e) { failed++; log(`${tree} 맞추기 오류: ${e.code || ""} ${e.message}`); for (const d of ctx.family[tree] || []) ctx.dirty.add(lower(d)); }
     try { syncRegistry(ctx, tree, ev.inits); } catch (e) { log(`${tree} 예약 목록 맞추기 오류: ${e.code || ""} ${e.message}`); }
   }
+  // 실패가 있으면 3초 뒤 전체 대조로 다시 한다. 거듭 실패하면 간격을 두 배씩(길어야 BATCH_MS) 늘린다.
+  if (due) {
+    if (failed) { ctx.retryDelay = Math.min(Math.max((ctx.retryDelay || 1500) * 2, 3000), Math.max(BATCH_MS, 3000)); ctx.retryAt = now + ctx.retryDelay; }
+    else ctx.retryDelay = 0;
+  }
+  // 대상에서 빠진 폴더 표시는 버린다(남겨 두면 1분마다 할 일 없이 깨어난다).
+  for (const k of ctx.dirty) if (!TREES.some((t) => (ctx.family[t] || []).some((d) => lower(d) === k))) ctx.dirty.delete(k);
+  if (!ctx.dirty.size) ctx.dirtySince = 0;
+  else if (!ctx.dirtySince) ctx.dirtySince = now; // 실패해 다시 할 것이 남았다
+  if (ctx.own?.size) for (const [k, v] of ctx.own) if (now - v.at >= OWN_WRITE_TTL_MS) ctx.own.delete(k);
   let filled = 0;
   for (const e of emptyLoads) {
     const d = path.join(ctx.primary || "", "claude-code-sessions", ...e.key.split("/"));
@@ -666,17 +839,36 @@ function tick(ctx, opts = {}) {
   if (ctx.stateDirty) scheduleStateWrite(ctx);
 }
 
+// 상태 파일을 써야 할 것이 생겼다. urgent: 로그인·로그아웃·알려진 짝·쉬게 한 폴더처럼 다시 켤 때 꼭 있어야 하는 것.
+function markState(ctx, urgent) {
+  ctx.stateDirty = true;
+  if (urgent) ctx.stateUrgent = true;
+}
+
 function writeState(ctx) {
   ctx.stateDirty = false;
+  ctx.stateUrgent = false;
+  ctx.lastStateWrite = Date.now();
   const tmp = `${STATE_PATH}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(ctx.state));
   fs.renameSync(tmp, STATE_PATH);
 }
 
+// 급한 것은 2초 뒤, 맞춘 파일 목록만 바뀐 것은 지난번 쓴 뒤 1분이 지나야 쓴다. 이미 더 이르게 잡혀 있으면 그대로 둔다.
 function scheduleStateWrite(ctx) {
   if (!ctx.daemon) { writeState(ctx); return; }
-  if (ctx.stateTimer) return;
-  ctx.stateTimer = setTimeout(() => { ctx.stateTimer = null; try { writeState(ctx); } catch (e) { log(`상태 저장 실패: ${e.message}`); } }, STATE_WRITE_DEBOUNCE_MS);
+  const now = Date.now();
+  const at = Math.max(now + STATE_WRITE_DEBOUNCE_MS, ctx.stateUrgent ? 0 : (ctx.lastStateWrite || 0) + STATE_WRITE_MIN_MS);
+  if (ctx.stateTimer) {
+    if (ctx.stateTimerAt <= at) return;
+    clearTimeout(ctx.stateTimer);
+  }
+  ctx.stateTimerAt = at;
+  ctx.stateTimer = setTimeout(() => {
+    ctx.stateTimer = null;
+    if (!ctx.stateDirty) return;
+    try { writeState(ctx); } catch (e) { log(`상태 저장 실패: ${e.message}`); }
+  }, at - now);
 }
 
 function scheduleTick(ctx, ms) {
@@ -698,12 +890,13 @@ function loadState() {
   // v1(junction 판) 상태에서 이어받을 것: 로그 위치·알려진 짝·지금 계정. home은 더 쓰지 않는다.
   const union = s.v === 2 ? s.union || {} : {};
   for (const tree of TREES) if (union[tree]) delete union[tree][REGISTRY]; // 예약 목록은 파일 미러에서 뺐다
-  return { v: 2, logPath: s.logPath, logOffset: s.logOffset || 0, known: s.known || {}, active: s.active || null, union, synced: s.v === 2 ? s.synced || {} : {}, tasks: s.v === 2 ? s.tasks || {} : {}, existing: s.v === 2 ? s.existing || {} : {} };
+  // parked: 로그인 기록이 없어 쉬게 한 짝 폴더 {트리 → {짝 → {at, to}}}. 같은 v: 2에 칸만 더했다(옛 판으로 되돌려도 읽힌다).
+  return { v: 2, logPath: s.logPath, logOffset: s.logOffset || 0, known: s.known || {}, active: s.active || null, union, synced: s.v === 2 ? s.synced || {} : {}, tasks: s.v === 2 ? s.tasks || {} : {}, existing: s.v === 2 ? s.existing || {} : {}, parked: s.v === 2 ? s.parked || {} : {} };
 }
 
 function makeCtx(daemon) {
   // freshState: 상태 파일이 아직 없음(처음 설치). 이때 처음 읽는 앱 기록은 지난 일이다.
-  return { state: loadState(), daemon, freshState: !fs.existsSync(STATE_PATH), manifests: {}, dirty: new Set(), fullScanned: {}, watchers: {}, family: null, stateDirty: false };
+  return { state: loadState(), daemon, freshState: !fs.existsSync(STATE_PATH), manifests: {}, dirty: new Set(), dirtySince: 0, urgent: false, retryAt: 0, fullScanned: {}, watchers: {}, family: null, stateDirty: false };
 }
 
 function runningPid() {
@@ -745,7 +938,10 @@ function printStatus(ctx) {
     else if (sums.length === 1) console.log("  (계정 폴더가 하나뿐 — 다른 계정으로 로그인하면 함께 맞춥니다)");
     else if (sums.every((s) => s.dir && s.ok && s.n === sums[0].n && s.files === sums[0].files)) console.log(`  ○ ${sums.length}곳이 모두 같습니다(세션 ${sums[0].n}개)`); // ○·△는 한글 기본 글꼴(KS X 1001)에 있어 옛 콘솔에서도 보인다
     else console.log(`  △ 아직 서로 다른 폴더가 있습니다 — ${running ? "몇 초 뒤 다시 보세요" : "지켜보기가 꺼져 있습니다. 설치 한 줄을 다시 실행하세요"}`);
+    const parked = Object.keys(state.parked?.[tree] || {}).length;
+    if (parked) console.log(`  쉬는 짝 폴더 ${parked}곳(이 PC에서 로그인한 기록이 없음 — 그 계정으로 처음 로그인하면 바로 채우고 「껐다 켜기」를 알립니다)`);
   }
+  console.log(`맞추는 방식: 새 세션·지운 세션·로그인·로그아웃은 바로, 이미 있는 기록을 고쳐 쓴 것은 ${Math.round(BATCH_MS / 1000)}초씩 모아서`);
   const snaps = snapshotDirs();
   console.log(`백업: ${snaps.length}개${snaps[0] ? `, 최근 ${path.basename(snaps[0])}` : ""}`);
 }
@@ -795,13 +991,13 @@ if (mode === "help") {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(PID_PATH, JSON.stringify(process.pid));
   const ctx = makeCtx(true);
-  log("지켜보기 시작(v2 미러)");
+  log(`지켜보기 시작(v3 미러: 고쳐 쓴 기록은 ${Math.round(BATCH_MS / 1000)}초씩 모아서, 로그인 기록이 없는 짝은 쉬게)`);
   runTick(ctx);
   setInterval(() => {
-    // 폴더 자체의 mtime이 바뀌면(파일 추가·삭제·이름 바꾸기) 그 폴더만 다시 본다. 감시(fs.watch)가 놓친 것의 뒷받침.
+    // 폴더 자체의 mtime이 바뀌면(파일 추가·삭제·이름 바꾸기) 그 폴더를 다음 묶음 때 다시 본다. 감시(fs.watch)가 놓친 것의 뒷받침.
     if (ctx.family) for (const tree of TREES) for (const d of ctx.family[tree] || []) {
       const m = mtime(d), k = lower(d);
-      if (ctx.dirMtimes?.has(k) && ctx.dirMtimes.get(k) !== m) ctx.dirty.add(k);
+      if (ctx.dirMtimes?.has(k) && ctx.dirMtimes.get(k) !== m) markDirty(ctx, d, false);
       (ctx.dirMtimes ||= new Map()).set(k, m);
     }
     runTick(ctx);
