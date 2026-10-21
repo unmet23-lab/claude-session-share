@@ -9,7 +9,7 @@ Claude 데스크톱(Windows)에서 5시간 한도가 차서 다른 계정으로 
 | **이런 분께** | Windows에서 Claude 데스크톱 앱의 **Code 탭**(또는 Cowork)을 계정 두 개 이상으로 번갈아 쓰는 분. 다른 계정으로 로그인해도 하던 세션이 목록에 그대로 있고, 눌러서 이어 갈 수 있습니다. |
 | **해당 없음** | 일반 채팅 대화(계정 서버에 있어 옮길 수 없습니다), Mac·Linux, 터미널에서만 `claude`를 쓰는 경우 |
 | **건드리지 않는 것** | 대화 내용(`C:\Users\<이름>\.claude\projects`)은 열어 보지도, 바꾸지도, 지우지도 않습니다. 이 PC 안에서 계정 폴더끼리 복사만 하고 인터넷으로 아무것도 보내지 않습니다. 비밀번호·로그인 토큰은 읽지 않습니다. |
-| **백업** | 처음 설치할 때 계정 폴더 전부를 통째로 백업하고, 그 뒤로도 매시간 백업해 최근 24개를 남깁니다. 끄거나 지워도 세션은 그대로 남습니다. |
+| **백업** | 처음 설치할 때 계정 폴더 전부를 통째로 백업하고, 그 뒤로도 매시간 백업해 최근 24개를 남깁니다. 매시간 백업은 바뀐 파일만 새로 쓰고(나머지는 앞 백업에 이어 둠) 바뀐 게 없으면 건너뛰어 PC를 바쁘게 하지 않습니다. 끄거나 지워도 세션은 그대로 남습니다. |
 
 ## 빠른 시작 (5분)
 
@@ -196,7 +196,7 @@ powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\claude-session-share
 | `uninstall.ps1` | 제거기 사본 |
 | `claude-session-share.json` | 지난번 맞춘 모습. 지켜보기를 다시 켜도 삭제를 알아보는 데 씁니다. 바뀐 것이 있을 때만 씁니다(로그인·로그아웃은 2초 안에, 맞춘 파일 목록만 바뀐 것은 1분에 한 번까지). |
 | `claude-session-share.log` | 무엇을 옮기고 지웠는지 남긴 기록 |
-| `claude-session-backups\` | `날짜-시각-before-mirror\`는 설치 때 전체 백업, `날짜-시\`는 매시간 백업, `날짜-시각-parked\`는 로그인 기록이 없어 쉬게 한 계정 폴더 |
+| `claude-session-backups\` | `날짜-시각-before-mirror\`는 설치 때 전체 백업, `날짜-시\`는 매시간 백업(폴더마다 전체 목록이 다 있고, 앞 백업과 같은 파일은 하드 링크라 공간을 거의 안 씀), `날짜-시각-parked\`는 로그인 기록이 없어 쉬게 한 계정 폴더 |
 
 ### 백업에서 되돌리기(고급)
 
@@ -267,7 +267,7 @@ The status ends with a line like 「○ 3곳이 모두 같습니다」 ("all 3 f
 
 - This is an unofficial tool and is not affiliated with Anthropic.
 - It was tested only with Claude desktop 2.42304.0–2.42304.2 from the Microsoft Store on Windows 11.
-- The first install backs up every account folder. While running, it backs up the fullest folder every hour and keeps the last 24.
+- The first install backs up every account folder. While running, it backs up the fullest folder every hour and keeps the last 24; each hourly backup writes only the files that changed (unchanged files are hard links to the previous hourly backup) and an hour with no changes is skipped.
 - The archive index is not merged; the newest copy wins everywhere.
 - The scheduled task list (`scheduled-tasks.json`) is merged task by task instead. The app rewrites this list on every sign-in and writes an empty one for a new account, which would otherwise wipe every account's tasks. A task counts as deleted only when one task the app actually knew in that account (read at sign-in or created there) disappears. An empty list from a new account, tasks the app has not loaded yet, and several tasks vanishing at once are restored instead. If tasks are restored into the account you are using, restart Claude so it runs them again.
 - The first time you sign in with an account on this PC, the app reads an empty list. The tool fills the folder at once and shows a Windows notification (sent as "Windows PowerShell"). Restart Claude once and the sessions appear; that account shows them right away from then on. To avoid this restart when you hit a limit, sign in once with each account you plan to rotate right after installing, then switch back.
