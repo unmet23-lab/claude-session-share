@@ -786,15 +786,66 @@ function fullestDir(ctx) {
   return best;
 }
 
-function snapshot(ctx, tag) {
+// 백업할 파일 목록: 상대 경로('/' 구분) → {m, s}. 앱·우리 임시 파일과 연결은 빼고 예약 목록(scheduled-tasks.json)은 넣는다.
+function backupFiles(dir) {
+  const out = new Map();
+  const walk = (d, rel) => {
+    let ents;
+    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      if (isTempName(e.name) || e.isSymbolicLink()) continue;
+      const p = path.join(d, e.name), r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) { walk(p, r); continue; }
+      if (!e.isFile()) continue;
+      try { const st = fs.statSync(p); out.set(r, { m: Math.round(st.mtimeMs), s: st.size }); } catch {}
+    }
+  };
+  walk(dir, "");
+  return out;
+}
+const hourlyNames = () => safeReaddir(BACKUP_DIR).filter((n) => /^\d{8}-\d{2}$/.test(n) && kind(path.join(BACKUP_DIR, n)) === "dir").sort();
+
+// 매시간 백업. 바로 앞 매시간 백업과 크기·시각이 같은 파일은 그 파일의 하드 링크로 두고(데이터를 다시 쓰지 않는다)
+// 바뀐 파일만 복사한다. 앞 백업 뒤로 바뀐 것이 하나도 없으면 그 시간은 건너뛴다(쉬는 동안엔 아무것도 쓰지 않는다).
+// 예전에는 매시간 3,600여 파일·약 20MB를 통째로 복사해, 정시마다 디스크가 바빠졌다(삭제 표식 3,400여 개는 한 번 쓰면 안 바뀐다).
+// 앱은 이 백업 폴더를 읽지 않으므로, 링크 수가 1이 아닌 파일을 거부하는 앱의 검사와는 상관없다. 되돌릴 때는 복사해서 꺼낸다.
+// 임시 폴더에 다 만든 뒤 이름을 바꿔 넣는다 — 도중에 꺼져도 반쪽 백업이 다음 백업의 바탕이 되지 않게.
+function snapshot(ctx) {
   const src = fullestDir(ctx);
   if (!src) return;
-  const dest = path.join(BACKUP_DIR, tag ? `${secStamp()}-${tag}` : hourStamp());
+  const name = hourStamp();
+  const dest = path.join(BACKUP_DIR, name);
   if (fs.existsSync(dest)) return;
+  for (const n of safeReaddir(BACKUP_DIR)) if (n.startsWith(".making-")) { try { fs.rmSync(path.join(BACKUP_DIR, n), { recursive: true, force: true }); } catch {} }
+  const prevName = hourlyNames().filter((n) => n < name).pop();
+  const prev = prevName ? path.join(BACKUP_DIR, prevName) : null;
+  const cur = backupFiles(src);
+  const base = prev ? backupFiles(prev) : new Map();
+  if (prev && cur.size === base.size && [...cur].every(([rel, v]) => sameEntry(v, base.get(rel)))) return;
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
-  fs.cpSync(src, dest, { recursive: true, filter: (p) => !isTempName(path.basename(p)) });
-  const hourly = snapshotDirs().filter((p) => /^\d{8}-\d{2}$/.test(path.basename(p)));
-  for (const p of hourly.slice(SNAPSHOT_KEEP)) fs.rmSync(p, { recursive: true, force: true });
+  const tmp = path.join(BACKUP_DIR, `.making-${name}-${process.pid}`);
+  let linked = 0, copied = 0, bytes = 0;
+  try {
+    for (const [rel, v] of cur) {
+      const parts = rel.split("/");
+      const to = path.join(tmp, ...parts);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      if (sameEntry(v, base.get(rel))) {
+        try { fs.linkSync(path.join(prev, ...parts), to); linked++; continue; } catch {} // 링크가 안 되면(다른 드라이브 등) 복사한다
+      }
+      fs.copyFileSync(path.join(src, ...parts), to);
+      const t = new Date(v.m);
+      try { fs.utimesSync(to, t, t); } catch {}
+      copied++; bytes += v.s;
+    }
+    fs.renameSync(tmp, dest);
+  } catch (e) {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+    throw e;
+  }
+  log(`매시간 백업 ${name}: 바뀐 파일 ${copied}개(${(bytes / 1048576).toFixed(1)}MB)만 새로 쓰고 ${linked}개는 앞 백업에 이음`);
+  const hourly = hourlyNames();
+  for (const n of hourly.slice(0, Math.max(0, hourly.length - SNAPSHOT_KEEP))) fs.rmSync(path.join(BACKUP_DIR, n), { recursive: true, force: true });
 }
 
 // 맞추기 전 전체 백업: 모든 뿌리의 두 트리를 짝 폴더째 복사한다(계정마다 다른 파일이 더 최근 것으로 덮이기 전에).

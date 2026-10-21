@@ -318,3 +318,30 @@ test("처음 쓰는 짝의 로그인은 지나가는 로그인인지 몇 초 지
   assert.equal(s.notes(), notes, "지나가는 로그인에는 알리지 않는다");
   assert.match(s.shareLog(), /dddddddd\/0000000a: 앱이 계정을 바꾸며 \d+초만 거친 짝/);
 });
+
+test("매시간 백업은 바뀐 파일만 새로 쓰고 나머지는 앞 백업에 링크로 이으며, 바뀐 게 없으면 건너뛴다", () => {
+  const s = setup("snapshot");
+  s.log(twoLogins());
+  s.put("A", "local_s1.json", { v: 1 });
+  s.put("A", "local_s2.json", { v: 1 });
+  s.run();
+  const backups = path.join(s.env.CLAUDE_SESSION_SHARE_HOME, "claude-session-backups");
+  const hourly = () => fs.readdirSync(backups).filter((n) => /^\d{8}-\d{2}$/.test(n)).sort();
+  assert.equal(hourly().length, 1, "처음엔 통째로 하나");
+  fs.renameSync(path.join(backups, hourly()[0]), path.join(backups, "20000101-00")); // 앞 시간의 백업처럼
+  s.put("A", "local_s2.json", { v: 2 }, 0); // 하나만 바뀜
+  s.run();
+  const names = hourly();
+  assert.equal(names.length, 2);
+  const cur = path.join(backups, names[1]);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(cur, "local_s2.json"), "utf8")).v, 2, "바뀐 파일은 새 판");
+  assert.ok(fs.statSync(path.join(cur, "local_s1.json")).nlink >= 2, "안 바뀐 파일은 앞 백업의 링크");
+  assert.equal(fs.statSync(path.join(cur, "local_s2.json")).nlink, 1, "바뀐 파일만 새로 쓴다");
+  assert.match(s.shareLog(), /매시간 백업 \d{8}-\d{2}: 바뀐 파일 1개/);
+  fs.rmSync(path.join(backups, "20000101-00"), { recursive: true, force: true });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(cur, "local_s1.json"), "utf8")).v, 1, "앞 백업을 지워도 남은 백업의 파일은 그대로");
+  fs.renameSync(cur, path.join(backups, "20000101-01"));
+  s.run();
+  assert.deepEqual(hourly(), ["20000101-01"], "앞 백업 뒤로 바뀐 게 없으면 새 백업을 만들지 않는다");
+  assert.deepEqual(fs.readdirSync(backups).filter((n) => n.startsWith(".making-")), [], "임시 폴더가 남지 않는다");
+});
