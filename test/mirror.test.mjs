@@ -95,6 +95,9 @@ const initLine = (acct, existing) =>
   `2026-10-19 08:50:58 [info] [LocalSessionManager] Initialization succeeded — accountId=${acct}, orgId=${ORG}${existing === undefined ? "" : `, existingSessions=${existing}`}\n`;
 const loadedLine = (acct, n, home = "C:\\Users\\me") =>
   `2026-10-19 08:50:58 [info] Loaded ${n} persisted sessions from ${home}\\AppData\\Roaming\\Claude\\claude-code-sessions\\${acct}\\${ORG} (0 archived deferred)\n`;
+// 짝 폴더가 아직 없을 때 Code 탭이 「Loaded 0」 대신 남기는 줄(앱 4.4212, 2026-11-01 이 PC 기록과 같은 모양).
+const missingLine = (acct, home = "C:\\Users\\me") =>
+  `2026-11-01 17:54:58 [info] [LocalSessionManager] Session storage directory does not exist yet, skipping load: ${home}\\AppData\\Local\\Claude-Data\\claude_abcdefghijklm\\claude-code-sessions\\${acct}\\${ORG}\n`;
 const noteLines = (t) => t.notes().split("\n").filter(Boolean);
 
 // 알림 시험은 먼저 한 번 돌려 상태 파일을 만든다(상태 파일 없이 처음 읽는 기록은 설치 직후의 지난 일이라 알리지 않는다).
@@ -109,6 +112,29 @@ test("처음 쓰는 계정이 빈 목록을 읽으면 폴더를 채우고 「한
   assert.match(t.notes(), /이전 세션 1개/);
   t.run();
   assert.equal(noteLines(t).length, 1, "다시 돌려도 같은 일로 두 번 알리면 안 된다");
+});
+
+test("처음 쓰는 계정의 짝 폴더가 아직 없어 앱이 「does not exist yet」만 남겨도 채우고 한 번 알린다", () => {
+  const t = setup("first-login-missing");
+  t.put("A", "local_n1.json", { sessionId: "local_n1", cliSessionId: "16161616-1616-4161-8161-161616161616" });
+  t.run();
+  fs.rmSync(t.dir("B"), { recursive: true, force: true });
+  t.log(initLine(ACCT.B, 0) + missingLine(ACCT.B));
+  t.run();
+  assert.ok(t.has("B", "local_n1.json"), "처음 쓰는 계정 폴더를 만들어 채워야 한다");
+  assert.match(t.notes(), /한 번만 껐다 켜/);
+  assert.match(t.notes(), /이전 세션 1개/);
+  t.run();
+  assert.equal(noteLines(t).length, 1, "다시 돌려도 같은 일로 두 번 알리면 안 된다");
+});
+
+test("같은 계정 재로그인(existingSessions>0) 뒤 「does not exist yet」은 알리지 않는다", () => {
+  const t = setup("same-user-missing");
+  t.put("A", "local_n2.json", { sessionId: "local_n2", cliSessionId: "17171717-1717-4171-8171-171717171717" });
+  t.run();
+  t.log(initLine(ACCT.A, 1) + missingLine(ACCT.A));
+  t.run();
+  assert.equal(t.notes(), "");
 });
 
 test("설치 직후 첫 맞추기는 지난 기록의 「Loaded 0」에 알리지 않지만 폴더는 채운다", () => {

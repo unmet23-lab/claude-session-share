@@ -19,7 +19,8 @@
 //   - 세션 기록(local_*.json)은 삭제 표식(deleted_<CLI 세션ID>)이 어디든 있으면 지운 것으로 보고 되살리지 않는다.
 //   - 예약 작업 목록(scheduled-tasks.json)만은 파일째 맞추지 않고 작업(id)마다 합친다. 앱은 로그인할 때마다 목록을 다시 쓰고
 //     처음 보는 짝엔 빈 목록을 써서, 「최근 것이 이김」이면 그 빈 목록이 모든 계정의 예약을 지운다(아래 「예약 작업 목록」).
-//   - 앱이 처음 보는 짝으로 로그인하면(main.log 「Loaded 0 persisted sessions from …」) 그 폴더를 바로 채우고 윈도 알림으로 「껐다 켜기」를 알린다.
+//   - 앱이 처음 보는 짝으로 로그인하면(main.log 「Loaded 0 persisted sessions from …」, 짝 폴더가 아직 없으면 「Session storage directory
+//     does not exist yet, skipping load: …」) 그 폴더를 바로 채우고 윈도 알림으로 「껐다 켜기」를 알린다.
 //     같은 계정으로 다시 로그인할 때도 「Loaded 0」이 남지만(직전 줄 existingSessions=N, 이미 메모리에 있어 새로 읽은 게 없다는 뜻) 그때는 알리지 않는다.
 //   - 대화 원문(~/.claude/projects)은 계정과 상관없이 하나라 손대지 않는다.
 //   - --once --backup은 맞추기 전에 모든 짝 폴더를 통째로 백업한다. 지켜보는 동안엔 가장 기록이 많은 폴더를 매시간 백업한다(최근 24개).
@@ -80,6 +81,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const INIT_LINE = /\[LocalSessionManager\] Initialization succeeded — accountId=([0-9a-f-]{36}), orgId=([0-9a-f-]{36})(?:, existingSessions=(\d+))?/g;
 // 경로에 공백이 있어도 되게(C:\Users\Hong Gildong\…) 「.+?」로 줄 안에서만 찾는다. 「.」은 줄을 넘지 않는다.
 const LOADED_LINE = /Loaded (\d+) persisted sessions from (.+?)[\\/]([0-9a-f-]{36})[\\/]([0-9a-f-]{36})(?=\s|$)/g;
+// 짝 폴더가 아직 없으면 Code 탭은 「Loaded 0」 대신 이 줄만 남긴다(앱 4.4212에서 확인, 2026-11-01 처음 쓰는 계정이 알림 없이 빈 목록으로 남았다).
+// 세션 0개를 읽은 것과 같으므로 「Loaded 0」으로 친다.
+const MISSING_LINE = /\[LocalSessionManager\] Session storage directory does not exist yet, skipping load: (.+?)[\\/]([0-9a-f-]{36})[\\/]([0-9a-f-]{36})(?=\s|$)/g;
 const LOGOUT_LINE = /\[LocalSessionManager\] Account logged out/g;
 // 앱이 쓰다 만 임시 파일(.tmp-<pid>-<uuid>, 이름.tmp-숫자10자리hex6자리, 이름.json.tmp)과 우리 임시 파일(.mirror-…)은 건너뛴다.
 // 이름.json.tmp는 앱이 쓰고 곧바로 이름을 바꾸는 파일이라, 옮기려 하면 「복사 실패: ENOENT」만 남는다(2026-10-18 기록 202줄).
@@ -248,6 +252,7 @@ function readLogEvents(state, logPath) {
   const ev = [];
   for (const m of text.matchAll(INIT_LINE)) ev.push({ at: m.index, type: "init", key: pairKey(m[1], m[2]), existing: m[3] === undefined ? null : Number(m[3]), ts: lineTime(text, m.index) });
   for (const m of text.matchAll(LOADED_LINE)) if (UUID.test(m[3]) && UUID.test(m[4])) ev.push({ at: m.index, type: "loaded", n: Number(m[1]), tree: path.basename(m[2]), key: pairKey(m[3], m[4]) });
+  for (const m of text.matchAll(MISSING_LINE)) if (UUID.test(m[2]) && UUID.test(m[3])) ev.push({ at: m.index, type: "loaded", n: 0, tree: path.basename(m[1]), key: pairKey(m[2], m[3]) });
   for (const m of text.matchAll(LOGOUT_LINE)) ev.push({ at: m.index, type: "logout", ts: lineTime(text, m.index) });
   ev.sort((a, b) => a.at - b.at);
   // 「Loaded N」 줄에는 그 짝의 바로 앞 로그인 줄의 existingSessions를 붙인다. 두 줄이 다른 바퀴에 읽혀도 되게 상태에 둔다.

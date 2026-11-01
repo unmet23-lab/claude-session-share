@@ -150,7 +150,7 @@ powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\claude-session-share
 - 앱이 잠깐 쓰고 지우는 임시 파일(`*.tmp`)은 옮기지 않습니다.
 - 예약 작업 목록(`scheduled-tasks.json`)은 파일째 맞추지 않고 작업마다 합칩니다. 아래 「예약 작업」을 보세요.
 - Cowork 세션 폴더(`local-agent-mode-sessions`)도 같은 방식으로 맞춥니다.
-- 앱은 폴더를 지켜보지 않고 로그인할 때만 목록을 읽습니다. 그래서 앱 기록(`main.log`)에 「Loaded 0 persisted sessions」가 남고 그 직전 로그인 줄의 `existingSessions`도 0이면(처음 쓰는 계정), 그 폴더를 채운 뒤 「한 번만 껐다 켜 주세요」 알림을 띄웁니다. 같은 계정으로 다시 로그인한 경우(`existingSessions`가 0보다 큼)는 목록이 이미 보이므로 알리지 않습니다. 설치 직후 첫 맞추기 때 읽는 지난 기록에도 알리지 않습니다(설치기가 따로 「껐다 켜세요」를 알려 줍니다).
+- 앱은 폴더를 지켜보지 않고 로그인할 때만 목록을 읽습니다. 그래서 앱 기록(`main.log`)에 「Loaded 0 persisted sessions」(그 계정 폴더가 아직 없으면 「Session storage directory does not exist yet, skipping load」 — 2026년 11월 앱 판에서 확인)가 남고 그 직전 로그인 줄의 `existingSessions`도 0이면(처음 쓰는 계정), 그 폴더를 채운 뒤 「한 번만 껐다 켜 주세요」 알림을 띄웁니다. 같은 계정으로 다시 로그인한 경우(`existingSessions`가 0보다 큼)는 목록이 이미 보이므로 알리지 않습니다. 설치 직후 첫 맞추기 때 읽는 지난 기록에도 알리지 않습니다(설치기가 따로 「껐다 켜세요」를 알려 줍니다).
 
 ### 예약 작업
 
