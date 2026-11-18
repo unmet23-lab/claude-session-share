@@ -6,25 +6,21 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { command, args, testRoot, sandboxEnv } from "../test-support/runner.mjs";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SCRIPT = process.env.CLAUDE_SESSION_SHARE_SCRIPT || path.join(HERE, "..", "claude-session-share.mjs");
 const ORG = "0000000a-0000-4000-8000-00000000000f";
 const ACCT = { A: "aaaaaaaa-0000-4000-8000-000000000001", B: "bbbbbbbb-0000-4000-8000-000000000002" };
 const FAMILY = "Claude_test0000000";
 
 function setup(name) {
-  const root = path.join(HERE, "..", ".test-tmp", `move-${name}`);
-  fs.rmSync(root, { recursive: true, force: true });
+  const root = path.join(testRoot, `move-${name}`);
   const env = {
-    ...process.env,
+    ...sandboxEnv,
     USERPROFILE: path.join(root, "home"), HOME: path.join(root, "home"),
     LOCALAPPDATA: path.join(root, "local"), APPDATA: path.join(root, "roaming"),
     CLAUDE_SESSION_SHARE_HOME: path.join(root, "share"),
     CLAUDE_SESSION_SHARE_NOTIFY_FILE: path.join(root, "notify.txt"),
   };
-  delete env.CLAUDE_CONFIG_DIR;
   for (const d of [env.USERPROFILE, path.join(env.LOCALAPPDATA, "Claude", "logs")]) fs.mkdirSync(d, { recursive: true });
   fs.writeFileSync(path.join(env.LOCALAPPDATA, "Claude", "logs", "main.log"), "");
   // 옮긴 자리(패키지 밖)와 옛 자리(패키지 안)
@@ -39,7 +35,7 @@ function setup(name) {
     fs.utimesSync(p, when, when);
   };
   const run = (mode = "--once") => {
-    const r = spawnSync(process.execPath, [SCRIPT, mode], { env, encoding: "utf8" });
+    const r = spawnSync(command, [...args, mode], { env, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr || r.stdout);
     return r.stdout;
   };

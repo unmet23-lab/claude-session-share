@@ -1,6 +1,14 @@
 # Runtime files. They only land here if CLAUDE_SESSION_SHARE_HOME points at this folder.
 claude-session-share.json
 claude-session-share.json.tmp
+claude-session-share.before-native-*.json
+claude-session-share-directories.json
+claude-session-share-directories.*.tmp
+runtime-home.txt
+.watch.lock
+.install.lock
+.request-*
+.state-*.tmp
 claude-session-share.log
 claude-session-share.pid
 claude-session-backups/
@@ -11,3 +19,5 @@ node_modules/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+/target/

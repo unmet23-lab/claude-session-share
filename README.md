@@ -15,21 +15,9 @@ Claude 데스크톱(Windows)에서 5시간 한도가 차서 다른 계정으로 
 
 설치 전에 Claude에서 Code 탭을 한 번 열어 두세요.
 
-### 1. PowerShell을 열고 Node.js 확인 (없으면 설치, 2~3분)
+### 1. PowerShell 열기
 
-시작 단추를 누르고 `powershell`이라고 친 뒤 Enter를 누르면 파란(또는 검은) 창이 열립니다. 보통 창이면 되고 「관리자 권한으로 실행」은 필요 없습니다. **Claude 앱 안의 터미널이나 Claude에게 시키는 방법은 안 됩니다**(설치기가 멈춥니다).
-
-그 창에 아래를 치고 Enter를 누릅니다.
-
-```powershell
-node --version
-```
-
-`v20` 이상(예: `v22.12.0`)이 나오면 2번으로 갑니다. 빨간 글씨로 「'node' 용어가 … 인식되지 않습니다」가 나오면 없는 것입니다.
-
-없으면 [nodejs.org](https://nodejs.org)에서 초록색 **LTS** 단추로 받은 파일을 실행하고, 묻는 것은 모두 「Next」→「Install」→「Finish」를 누릅니다. 「이 앱이 디바이스를 변경하도록 허용하시겠어요?」가 뜨면 「예」. 명령이 편하면 `winget install OpenJS.NodeJS.LTS`도 됩니다.
-
-**설치가 끝나면 열어 둔 PowerShell 창을 닫고 새로 엽니다.** 먼저 연 창은 방금 설치한 Node.js를 찾지 못합니다.
+Windows에서 시작 단추를 누르고 `powershell`을 입력해 엽니다. 일반 사용자 권한이면 됩니다. x64 프로그램을 실행할 수 있는 PC에는 Rust판을 설치합니다. 32비트 Windows나 x64 프로그램을 실행할 수 없는 ARM PC에는 기존 Node.js판을 설치합니다. 이 경우 Node.js 20 이상이 필요합니다.
 
 ### 2. 한 줄 붙여 넣기 (30초)
 
@@ -39,7 +27,7 @@ node --version
 irm https://raw.githubusercontent.com/unmet23-lab/claude-session-share/main/install.ps1 | iex
 ```
 
-10~30초 뒤 마지막에 **초록색으로 「설치했습니다.」**가 나오면 성공입니다. 그 위에 길게 나오는 표는 계정 폴더 상태이고 에러가 아닙니다.
+마지막에 **초록색으로 「설치했습니다.」 또는 「업데이트했습니다.」**가 나오면 완료입니다. 기존 세션이 많으면 전환 전 백업에 몇 분이 걸릴 수 있습니다. 그 위에 길게 나오는 표는 계정 폴더 상태이고 에러가 아닙니다.
 
 - **노란 글**이 나오면 설치가 거기서 멈춘 것입니다. 그 글이 시키는 대로 한 뒤 같은 한 줄을 다시 붙여 넣으세요.
 - **빨간 「설치하지 못했습니다:」**가 나오면 그 줄을 복사해 [이슈](https://github.com/unmet23-lab/claude-session-share/issues)로 남겨 주세요.
@@ -59,7 +47,7 @@ irm https://raw.githubusercontent.com/unmet23-lab/claude-session-share/main/inst
 PowerShell에서 아래를 실행합니다. 설치 한 줄을 다시 붙여 넣어도 같은 표가 나오고 「업데이트했습니다.」로 끝납니다.
 
 ```powershell
-node "$env:LOCALAPPDATA\claude-session-share\claude-session-share.mjs" --status
+& "$env:LOCALAPPDATA\claude-session-share\claude-session-share.exe" --status
 ```
 
 이렇게 나옵니다(긴 글자는 계정·조직 ID이고, 이메일은 나오지 않습니다).
@@ -86,7 +74,6 @@ Cowork 세션(local-agent-mode-sessions): 0곳, 맞춘 파일 0개
 
 | 이런 글이 나오면 | 이렇게 하세요 |
 |---|---|
-| 노란 「Node.js가 없습니다」 | 1번대로 Node.js를 설치하고, **PowerShell 창을 새로 연 뒤** 한 줄을 다시 붙여 넣습니다. |
 | 노란 「이 창은 … 같은 앱 안에서 연 터미널이라…」 | Claude 앱 안의 터미널이거나 Claude에게 시킨 경우입니다. 시작 단추 → `powershell` 입력 → Enter로 창을 따로 열어 다시 붙여 넣습니다. |
 | 노란 「아직 Code 탭을 쓴 적이 없는 것 같습니다」 | 그대로 두면 됩니다. Code 탭을 쓰기 시작하면 자동으로 맞춥니다. |
 | 다른 계정으로 바꿨더니 목록이 비어 있음 | 그 계정을 이 PC에서 처음 쓰는 경우가 대부분입니다. 알림이 떴든 안 떴든 3번대로 한 번만 완전히 껐다 켜면 보이고, 다음부터는 바꾸자마자 보입니다. 그래도 비어 있으면 위 「잘 됐는지 확인」에서 지켜보기가 실행 중인지 봅니다. |
@@ -110,7 +97,7 @@ irm https://raw.githubusercontent.com/unmet23-lab/claude-session-share/main/unin
 powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\claude-session-share\uninstall.ps1"
 ```
 
-꺼도 지금까지 맞춘 세션은 각 계정 폴더에 그대로 있습니다. 앞으로 만드는 세션은 다시 계정마다 따로 쌓입니다. Node.js도 그대로 남으니, 필요 없으면 Windows 설정 > 앱에서 지우세요.
+꺼도 지금까지 맞춘 세션은 각 계정 폴더에 그대로 있습니다. 앞으로 만드는 세션은 다시 계정마다 따로 쌓입니다.
 
 ## 주의
 
@@ -168,31 +155,32 @@ powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\claude-session-share
 ### 설치기가 하는 일
 
 1. Claude·Codex 같은 앱 안의 터미널에서 실행했는지 봅니다. 그렇다면 멈춥니다(그런 창에서는 PC를 켤 때 자동 실행되지 않습니다).
-2. Node.js 20 이상이 있는지 확인합니다.
+2. Windows x64 실행 파일의 SHA-256을 확인하고 이 PC에서 실행되는지 검사합니다.
 3. Claude의 세션 폴더를 찾습니다. 아직 없으면(Code 탭을 쓴 적이 없으면) 그대로 설치하고, 나중에 생기면 맞춥니다.
-4. 스크립트와 제거기를 `%LOCALAPPDATA%\claude-session-share\`에 둡니다.
+4. 실행 파일과 제거기를 `%LOCALAPPDATA%\claude-session-share\`에 둡니다.
 5. PC를 켜고 윈도에 로그인할 때 창 없이 자동으로 시작되도록 시작프로그램 폴더(`shell:startup`)에 `claude-session-share.vbs`를 만듭니다.
 6. 처음 설치라면 모든 계정 폴더를 통째로 백업한 뒤 한 번 맞춥니다.
 7. 자동 맞춤을 시작하고 상태를 보여 줍니다.
 
-설치 한 줄을 다시 실행하면 업데이트입니다. 전체 백업과 첫 맞추기만 건너뛰고 나머지를 다시 합니다.
+설치 한 줄을 다시 실행하면 업데이트입니다. 기존 Node판에서 전환하거나 꺼 둔 공유기를 다시 설치할 때는 동기화 전에 세션 폴더와 상태를 백업합니다.
 
 ### 파일 위치
 
 | 무엇 | 위치 |
 |---|---|
-| 스크립트·상태·기록·백업 | `%LOCALAPPDATA%\claude-session-share\` (탐색기 주소창에 붙여 넣으면 열립니다) |
+| 실행 파일과 기본 상태·기록·백업 | `%LOCALAPPDATA%\claude-session-share\` (탐색기 주소창에 붙여 넣으면 열립니다) |
 | 자동 실행 | 시작프로그램 폴더(`shell:startup`)의 `claude-session-share.vbs` |
 | 앱 세션 목록, Microsoft Store판 | `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code-sessions\` |
 | 앱 세션 목록, Microsoft Store판(앱이 데이터를 패키지 밖으로 옮긴 뒤) | `%LOCALAPPDATA%\Claude-Data\claude_pzs8sxrjxfjjc\claude-code-sessions\` — 옛 자리엔 `.user-data-left.*` 표식만 남습니다. 앱이 계정마다 켜고 끄는 설정이라 다시 패키지 안으로 돌아갈 수도 있고, 이 도구는 세션 폴더가 있는 쪽을 따라갑니다 |
 | 앱 세션 목록, 홈페이지판 | `%APPDATA%\Claude\claude-code-sessions\` |
 | 앱 기록 | `%LOCALAPPDATA%\Claude\logs\main.log` |
 
-설치 폴더 안에는 다음 파일이 생깁니다.
+실행 파일은 항상 설치 폴더에 둡니다. 상태·기록·백업은 `CLAUDE_SESSION_SHARE_HOME`으로 바꿀 수 있습니다. 설치기는 설정한 위치를 `runtime-home.txt`에 기록해 다음 로그인 때도 같은 자료를 사용합니다.
 
 | 파일 | 내용 |
 |---|---|
-| `claude-session-share.mjs` | 자동 맞춤(지켜보기) 스크립트 |
+| `claude-session-share.exe` | 자동 맞춤을 실행하는 Windows 프로그램 |
+| `claude-session-share.mjs` | 예전 Node 명령을 사용하는 스크립트를 위한 실행 진입점 |
 | `uninstall.ps1` | 제거기 사본 |
 | `claude-session-share.json` | 지난번 맞춘 모습. 지켜보기를 다시 켜도 삭제를 알아보는 데 씁니다. 바뀐 것이 있을 때만 씁니다(로그인·로그아웃은 2초 안에, 맞춘 파일 목록만 바뀐 것은 1분에 한 번까지). |
 | `claude-session-share.log` | 무엇을 옮기고 지웠는지 남긴 기록 |
@@ -222,11 +210,18 @@ Copy-Item "<백업 폴더>\scheduled-tasks.json" $f
 
 `~/.claude.json`과 `CLAUDE_CONFIG_DIR`은 따로 설정하지 않아도 읽습니다(계정·조직 ID만 봅니다).
 
-### 시험
+### 빌드와 시험
 
-```powershell
+Windows용 Rust 도구로 실행 파일을 빌드합니다. 기존 Node판 소스는 `legacy/claude-session-share.mjs`에 있습니다. 두 구현에 같은 동기화 시험을 적용할 수 있습니다.
+
+~~~powershell
+cargo build --release --locked
 node --test
-```
+$env:CLAUDE_SESSION_SHARE_TEST_EXE = (Resolve-Path target/release/claude-session-share.exe).Path
+node --test
+~~~
+
+Windows 배포본을 갱신할 때는 시험한 실행 파일로 `.\tools\package.ps1 -Executable .\target\release\claude-session-share.exe`를 실행합니다. 설치기가 확인하는 SHA-256도 함께 갱신됩니다.
 
 가짜 앱 데이터 폴더를 만들어 돌리므로 실제 앱 데이터는 건드리지 않습니다. 윈도 알림도 띄우지 않고 환경 변수 `CLAUDE_SESSION_SHARE_NOTIFY_FILE`로 정한 파일에 적습니다. Claude 앱 안의 터미널이 아니라 보통 PowerShell에서 실행합니다.
 
@@ -234,7 +229,7 @@ node --test
 
 ## 라이선스
 
-[MIT](LICENSE)
+[MIT](LICENSE). Windows 배포본에 포함된 라이선스와 저작권 고지는 [NOTICES.txt](dist/windows-x64/NOTICES.txt)에 있습니다. 배포본을 다시 만들 때 같은 Rust 도구로 빌드한 뒤 `python tools/notices.py`를 실행하세요.
 
 ---
 
@@ -242,22 +237,22 @@ node --test
 
 ## English
 
-**What it does.** If you rotate several Claude accounts in the Claude desktop app on Windows, the Code tab shows an empty session list whenever you switch. Your transcripts in `~/.claude/projects` are still there. The app simply keeps its session list in a separate folder for each account and organization pair, under `claude-code-sessions\<account id>\<org id>\`. This tool keeps all of those folders identical. New and deleted files are copied across within a second or two; rewrites of existing session records (the app rewrites a ~100 KB record on every turn) are batched for 60 seconds and only the latest version is copied. As soon as the app's log shows a sign-out or sign-in, everything is synced at once, and nothing is batched between a sign-out and the next sign-in, so every folder is current whenever the app reads one. Only folders of account pairs that have signed in on this PC are kept in sync; folders that never did (for example account × organization combinations created by older versions) are moved into the backup folder (`*-parked`) once they match the others, and a first sign-in there takes the usual first-use path (the folder is filled and you are asked to restart Claude once). When switching accounts the app sometimes initializes the previous account with the new organization for a few seconds before the real sign-in; such pass-through pairs do not count as sign-ins, their folders are left empty and later parked, so the first sign-in of a new pair is watched for 30 seconds before it is filled. It lets the newest version of a file win, skips the app's short-lived `*.tmp` files, and never revives a session the app deleted. Cowork sessions (`local-agent-mode-sessions`) are mirrored the same way. It never reads, changes or deletes your conversations, sends nothing over the internet, and does not read passwords or login tokens. Regular chat conversations live on Anthropic's servers per account and are not affected.
+**What it does.** If you rotate several Claude accounts in the Claude desktop app on Windows, the Code tab shows an empty session list whenever you switch. Your transcripts in `~/.claude/projects` are still there. The app simply keeps its session list in a separate folder for each account and organization pair, under `claude-code-sessions\<account id>\<org id>\`. This tool keeps all of those folders identical. New and deleted files are copied across within a second or two; rewrites of existing session records (the app rewrites a ~100 KB record on every turn) are batched for five minutes and only the latest version is copied. As soon as the app's log shows a sign-out or sign-in, everything is synced at once, and nothing is batched between a sign-out and the next sign-in, so every folder is current whenever the app reads one. Only folders of account pairs that have signed in on this PC are kept in sync; folders that never did (for example account × organization combinations created by older versions) are moved into the backup folder (`*-parked`) once they match the others, and a first sign-in there takes the usual first-use path (the folder is filled and you are asked to restart Claude once). When switching accounts the app sometimes initializes the previous account with the new organization for a few seconds before the real sign-in; such pass-through pairs do not count as sign-ins, their folders are left empty and later parked, so the first sign-in of a new pair is watched for 30 seconds before it is filled. It lets the newest version of a file win, skips the app's short-lived `*.tmp` files, and never revives a session the app deleted. Cowork sessions (`local-agent-mode-sessions`) are mirrored the same way. It never reads, changes or deletes your conversations, sends nothing over the internet, and does not read passwords or login tokens. Regular chat conversations live on Anthropic's servers per account and are not affected.
 
 **Why not a junction?** The app refuses to save sessions into a folder that is a junction or symlink. Its log says `Refusing non-directory at private dir path (symlink/file plant)`. So the tool mirrors real folders instead.
 
-**Install.** You need Node.js 20 or newer (check with `node --version`; install the LTS from nodejs.org or `winget install OpenJS.NodeJS.LTS`, then open a new PowerShell window). Open a normal PowerShell window from the Start menu — not a terminal inside the Claude app, which the installer refuses — and run:
+**Install.** The installer includes a native Windows x64 executable. Open a normal PowerShell window from the Start menu — not a terminal inside the Claude app, which the installer refuses — and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/unmet23-lab/claude-session-share/main/install.ps1 | iex
 ```
 
-It ends with a green 「설치했습니다.」 ("Installed."). Then fully quit Claude from the tray icon (closing the window only hides it) and start it again. The installer puts the script in `%LOCALAPPDATA%\claude-session-share\` and adds `claude-session-share.vbs` to your Startup folder. It backs up every account folder, mirrors them once, then starts the watcher. Run the same line again to update.
+It ends with a green 「설치했습니다.」 ("Installed."). Then fully quit Claude from the tray icon (closing the window only hides it) and start it again. The installer puts the executable in `%LOCALAPPDATA%\claude-session-share\` and adds `claude-session-share.vbs` to your Startup folder. It backs up every account folder, mirrors them once, then starts the watcher. Run the same line again to update.
 
 **Status and removal.**
 
 ```powershell
-node "$env:LOCALAPPDATA\claude-session-share\claude-session-share.mjs" --status
+& "$env:LOCALAPPDATA\claude-session-share\claude-session-share.exe" --status
 irm https://raw.githubusercontent.com/unmet23-lab/claude-session-share/main/uninstall.ps1 | iex
 ```
 

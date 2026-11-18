@@ -8,17 +8,19 @@
 
 & {
 $Body = @'
+    $ErrorActionPreference = 'Stop'
     $InstallDir = Join-Path $env:LOCALAPPDATA 'claude-session-share'
+    $InstallDir = [IO.Path]::GetFullPath($InstallDir)
+    $Native = Join-Path $InstallDir 'claude-session-share.exe'
+    $Legacy = Join-Path $InstallDir 'claude-session-share.mjs'
     $VbsPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'claude-session-share.vbs'
-    # 이 도구의 스크립트를 지켜보기로 돌리는 node만 고른다(--once·--status 같은 한 번 실행은 뺀다).
-    $WatcherPattern = '[\\/"\s]claude-session-share\.mjs"?(\s|$)'
+    $WatcherPattern = '(?:^|\s)"?' + [regex]::Escape($Legacy) + '"?\s*$'
 
     function Say([string]$Text, [string]$Color = 'Gray') { Write-Host $Text -ForegroundColor $Color }
 
     try {
         Say ''
         Say 'Claude 세션 공유 끄기' 'Cyan'
-
         # 0. Claude·Codex 같은 스토어 앱 안의 터미널이면 멈춘다(AppData 파일이 앱 전용 폴더로 돌려져 보인다)
         $probeName = ".claude-session-share-probe-$PID"
         $probe = Join-Path $env:LOCALAPPDATA $probeName
@@ -32,10 +34,21 @@ $Body = @'
         }
 
         # 1. 지켜보기 멈추기
-        $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -and $_.CommandLine -match $WatcherPattern -and $_.CommandLine -notmatch '\s--(once|status|help)\b' })
+        $procs = @(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='claude-session-share.exe'" |
+            Where-Object { ($_.Name -eq 'node.exe' -and $_.CommandLine -match $WatcherPattern) -or
+                ($_.ExecutablePath -eq $Native -and $_.CommandLine -notmatch '\s--') })
         foreach ($p in $procs) {
-            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+            if ($p.ExecutablePath -eq $Native) {
+                $originalHome = $env:CLAUDE_SESSION_SHARE_HOME
+                try {
+                    $homeFile = Join-Path $InstallDir 'runtime-home.txt'
+                    if ([IO.File]::Exists($homeFile)) { $env:CLAUDE_SESSION_SHARE_HOME = [IO.File]::ReadAllText($homeFile).Trim() }
+                    & $Native --stop
+                } finally { $env:CLAUDE_SESSION_SHARE_HOME = $originalHome }
+                if ($LASTEXITCODE -ne 0) { throw '지켜보기를 멈추지 못했습니다.' }
+            } else { Stop-Process -Id $p.ProcessId -ErrorAction Stop }
+            Wait-Process -Id $p.ProcessId -Timeout 30 -ErrorAction SilentlyContinue
+            if (Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue) { throw '지켜보기가 아직 실행 중입니다.' }
             Say "  지켜보기를 멈췄습니다 (pid $($p.ProcessId))"
         }
         if ($procs.Count -eq 0) { Say '  돌고 있는 지켜보기가 없습니다.' }
@@ -53,7 +66,10 @@ $Body = @'
             $answer = ''
             Say "  설치 폴더: $InstallDir  (백업이 들어 있습니다)"
             try { $answer = Read-Host '  설치 폴더도 지울까요? 남기려면 그냥 Enter, 지우려면 y를 치고 Enter' } catch { }
-            if ($answer -match '^\s*(y|yes|예|네|ㅇ)\s*$') {
+            if ($InstallDir -ne [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'claude-session-share')) -or
+                (Get-Item -LiteralPath $InstallDir).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                Say "  직접 지정하거나 연결한 폴더는 남겨 둡니다: $InstallDir"
+            } elseif ($answer -match '^\s*(y|yes|예|네|ㅇ)\s*$') {
                 if ((Get-Location).Path -like "$InstallDir*") { Set-Location $env:USERPROFILE }
                 Remove-Item -LiteralPath $InstallDir -Recurse -Force
                 Say '  설치 폴더를 지웠습니다.'

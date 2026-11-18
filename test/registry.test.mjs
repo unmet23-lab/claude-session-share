@@ -6,20 +6,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { command, args, testRoot, sandboxEnv } from "../test-support/runner.mjs";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-// CLAUDE_SESSION_SHARE_SCRIPT로 다른 판(예: 고치기 전 판)을 시험할 수 있다.
-const SCRIPT = process.env.CLAUDE_SESSION_SHARE_SCRIPT || path.join(HERE, "..", "claude-session-share.mjs");
 const ORG = "0000000a-0000-4000-8000-00000000000f";
 const ACCT = { A: "aaaaaaaa-0000-4000-8000-000000000001", B: "bbbbbbbb-0000-4000-8000-000000000002", C: "cccccccc-0000-4000-8000-000000000003", D: "dddddddd-0000-4000-8000-000000000004" };
 const T0 = Math.floor(Date.now() / 1000) - 100000;
 
 function setup(name) {
-  const root = path.join(HERE, "..", ".test-tmp", name);
-  fs.rmSync(root, { recursive: true, force: true });
+  const root = path.join(testRoot, name);
   const env = {
-    ...process.env,
+    ...sandboxEnv,
     USERPROFILE: path.join(root, "home"), HOME: path.join(root, "home"),
     LOCALAPPDATA: path.join(root, "local"), APPDATA: path.join(root, "roaming"),
     CLAUDE_SESSION_SHARE_HOME: path.join(root, "share"),
@@ -47,7 +43,7 @@ function setup(name) {
         `2026-10-18 00:00:00 [info] [LocalSessionManager] Initialization succeeded — accountId=${ACCT[who]}, orgId=${ORG}, existingSessions=0\n`);
     },
     run() {
-      const r = spawnSync(process.execPath, [SCRIPT, "--once"], { env, encoding: "utf8" });
+      const r = spawnSync(command, [...args, "--once"], { env, encoding: "utf8" });
       assert.equal(r.status, 0, r.stderr || r.stdout);
       return r.stdout;
     },
@@ -164,4 +160,28 @@ test("옛 상태에 목록 파일 줄이 남아 있어도 목록 파일을 지�
   assert.ok(fs.existsSync(path.join(t.dir("B"), "local_1.json")), "세션 기록은 그대로 복사된다");
   const state = JSON.parse(fs.readFileSync(path.join(t.env.CLAUDE_SESSION_SHARE_HOME, "claude-session-share.json"), "utf8"));
   assert.equal(state.union["claude-code-sessions"]["scheduled-tasks.json"], undefined);
+});
+
+test("읽을 수만 있는 수신 폴더에서 삭제한 예약을 되살리지 않고 잠금이 풀리면 삭제를 마친다", {
+  skip: !process.env.CLAUDE_SESSION_SHARE_TEST_EXE || process.platform !== "win32",
+}, () => {
+  const t = setup("readonly-recipient");
+  t.write("A", [task("x"), task("keep")]);
+  t.write("B", [task("x"), task("keep")]);
+  t.login("A");
+  t.run();
+  const receiver = path.join(t.dir("B"), "scheduled-tasks.json");
+  fs.chmodSync(receiver, 0o444);
+  try {
+    t.write("A", [task("keep")]);
+    t.run();
+    assert.deepEqual(t.ids("B"), ["x", "keep"]);
+    t.run(); // Start again while the recipient still holds the old copy.
+    assert.deepEqual(t.ids("A"), ["keep"]);
+  } finally {
+    fs.chmodSync(receiver, 0o666);
+  }
+  t.run();
+  assert.deepEqual(t.ids("A"), ["keep"]);
+  assert.deepEqual(t.ids("B"), ["keep"]);
 });

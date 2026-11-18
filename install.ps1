@@ -13,180 +13,218 @@ $Here = $PSScriptRoot
 $Body = @'
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
-    $Repo = 'unmet23-lab/claude-session-share'
-    $Branch = 'main'
-    $BaseUrl = if ($env:CLAUDE_SESSION_SHARE_BASE_URL) { $env:CLAUDE_SESSION_SHARE_BASE_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/$Repo/$Branch" }
-    $InstallDir = Join-Path $env:LOCALAPPDATA 'claude-session-share'
-    $ScriptPath = Join-Path $InstallDir 'claude-session-share.mjs'
-    $UninstallPath = Join-Path $InstallDir 'uninstall.ps1'
-    $PidPath = Join-Path $InstallDir 'claude-session-share.pid'
-    $StatePath = Join-Path $InstallDir 'claude-session-share.json'
-    $VbsPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'claude-session-share.vbs'
-    # 이 도구의 스크립트를 지켜보기로 돌리는 node만 고른다(--once·--status 같은 한 번 실행은 뺀다).
-    $WatcherPattern = '[\\/"\s]claude-session-share\.mjs"?(\s|$)'
+    $BaseUrl = if ($env:CLAUDE_SESSION_SHARE_BASE_URL) { $env:CLAUDE_SESSION_SHARE_BASE_URL.TrimEnd('/') } else { 'https://raw.githubusercontent.com/unmet23-lab/claude-session-share/main' }
+    $InstallDir = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'claude-session-share'))
+    $HomeFile = Join-Path $InstallDir 'runtime-home.txt'
+    $originalHome = $env:CLAUDE_SESSION_SHARE_HOME
+    $registered = if ([IO.File]::Exists($HomeFile)) { [IO.File]::ReadAllText($HomeFile).Trim() }
+    $Data = if ($originalHome) { [IO.Path]::GetFullPath($originalHome) } elseif ($registered) { $registered } else { $InstallDir }
+    $Native = Join-Path $InstallDir 'claude-session-share.exe'
+    $Legacy = Join-Path $InstallDir 'claude-session-share.mjs'
+    $PidPath = Join-Path $Data 'claude-session-share.pid'
+    $State = Join-Path $Data 'claude-session-share.json'
+    $Startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'claude-session-share.vbs'
+    $ExpectedHash = '9A7D3CE70C1DE84884C161D869434D3E63DAC04A107EC7BB2142016E0AC02DDF'
 
-    function Say([string]$Text, [string]$Color = 'Gray') { Write-Host $Text -ForegroundColor $Color }
-
-    function Stop-Watchers {
-        $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -and $_.CommandLine -match $WatcherPattern -and $_.CommandLine -notmatch '\s--(once|status|help)\b' })
-        foreach ($p in $procs) {
-            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
-            Say "  돌던 지켜보기를 멈췄습니다 (pid $($p.ProcessId))"
-        }
-        if ($procs.Count) { Wait-Process -Id $procs.ProcessId -Timeout 10 -ErrorAction SilentlyContinue }
-    }
-
-    # node 출력을 UTF-8로 읽는다(콘솔 코드 페이지가 949여도 한글이 깨지지 않게).
-    function Invoke-Node([string[]]$NodeArgs) {
-        $oldPref = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        $oldEnc = $null
-        try { $oldEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
-        try {
-            $out = & $NodeExe $ScriptPath @NodeArgs 2>&1 | ForEach-Object { "$_" } | Out-String
-            return [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out }
-        } finally {
-            if ($oldEnc) { try { [Console]::OutputEncoding = $oldEnc } catch { } }
-            $ErrorActionPreference = $oldPref
-        }
-    }
-
-    # 저장소 파일을 임시 이름으로 받아 둔다. 파일로 실행했으면 옆의 파일을, 아니면 깃허브에서 받는다.
-    function Get-RepoFile([string]$Name) {
-        $tmp = Join-Path $InstallDir ".$Name.download"
-        $local = if ($Here) { Join-Path $Here $Name } else { $null }
-        if ($local -and (Test-Path -LiteralPath $local)) {
-            Copy-Item -LiteralPath $local -Destination $tmp -Force
+    function Fetch([string]$relative, [string]$to) {
+        if ($Here -and (Test-Path -LiteralPath (Join-Path $Here $relative) -PathType Leaf)) {
+            Copy-Item -LiteralPath (Join-Path $Here $relative) -Destination $to
         } else {
-            Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/$Name" -OutFile $tmp
+            Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/$relative" -OutFile $to
         }
-        if ((Get-Item -LiteralPath $tmp).Length -lt 200) { Remove-Item -LiteralPath $tmp -Force; throw "$Name 파일을 제대로 받지 못했습니다." }
-        return $tmp
     }
-
+    function File-Digest([string]$path) {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $stream = [IO.File]::OpenRead($path)
+        try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+        finally { $stream.Dispose(); $sha.Dispose() }
+    }
+    function Install-Legacy {
+        $legacyBootstrap = Join-Path ([IO.Path]::GetTempPath()) ('session-share-legacy-' + [guid]::NewGuid().ToString('N') + '.ps1')
+        try {
+            Fetch 'legacy/install.ps1' $legacyBootstrap
+            if ((File-Digest $legacyBootstrap) -ne 'E3E5D6F5D7D6DE27F0E5FF09E7A71C35649C403B492ED7D91035C1087DDF8B0A') { throw '이전 설치 도우미를 확인하지 못했습니다.' }
+            & $legacyBootstrap -Checkout $Here
+        } finally { [IO.File]::Delete($legacyBootstrap) }
+    }
+    function Get-Watchers {
+        $legacyArgs = '(?:^|\s)"?' + [regex]::Escape($Legacy) + '"?\s*$'
+        Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='claude-session-share.exe'" |
+            Where-Object {
+                ($_.Name -eq 'node.exe' -and $_.CommandLine -match $legacyArgs) -or
+                ($_.ExecutablePath -eq $Native -and $_.CommandLine -notmatch '\s--')
+            }
+    }
+    function Stop-Installed($workers) {
+        foreach ($p in $workers) {
+            if ($p.ExecutablePath -eq $Native) {
+                & $Native --stop
+                if ($LASTEXITCODE -ne 0) { throw '현재 지켜보기가 종료 요청을 처리하지 못했습니다.' }
+            } else {
+                Stop-Process -Id $p.ProcessId -ErrorAction Stop
+            }
+            Wait-Process -Id $p.ProcessId -Timeout 30 -ErrorAction SilentlyContinue
+            if (Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue) { throw "지켜보기가 아직 실행 중입니다. PID $($p.ProcessId)" }
+        }
+    }
+    function Start-Entry {
+        Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList ('"' + $Startup + '"') -WindowStyle Hidden
+    }
+    function Save-Original([string]$target, [string]$staged) {
+        $saved = $null
+        $tempFile = Join-Path ([IO.Path]::GetDirectoryName($target)) ('.install-' + [guid]::NewGuid().ToString('N') + '.tmp')
+        try {
+            [IO.File]::Copy($staged, $tempFile)
+            if ([IO.File]::Exists($target)) {
+                $saved = Join-Path $stage ([guid]::NewGuid().ToString())
+                [IO.File]::Copy($target, $saved)
+                # Use the Win32 atomic replace operation. Windows PowerShell maps a null string to "".
+                $unused = $tempFile + '.old'
+                try { [IO.File]::Replace($tempFile, $target, $unused) }
+                finally { [IO.File]::Delete($unused) }
+            } else { [IO.File]::Move($tempFile, $target) }
+            $changes.Add([pscustomobject]@{ Path=$target; Saved=$saved })
+        } finally { [IO.File]::Delete($tempFile) }
+    }
+    $lock = $null
+    $stage = $null
+    $keepStage = $false
+    $stopped = $false
+    $started = $false
+    $workers = @()
+    $changes = New-Object 'System.Collections.Generic.List[object]'
     try {
-        Say ''
-        Say 'Claude 세션 공유 설치' 'Cyan'
-
-        if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) { Say 'Windows 전용입니다. Mac·Linux는 지원하지 않습니다.' 'Yellow'; return }
-
-        # 1. Claude·Codex 같은 스토어 앱 안의 터미널이면 멈춘다(AppData 쓰기가 앱 전용 폴더로 돌려져 PC를 켤 때 실행되지 않는다).
-        #    Node.js보다 먼저 본다 — Claude에게 「설치해 줘」라고 시킨 경우 두 번 막히지 않게.
-        $packages = Join-Path $env:LOCALAPPDATA 'Packages'
+        if ($registered -and $registered.TrimEnd('\') -ne $Data.TrimEnd('\')) {
+            throw '설치된 지켜보기가 다른 데이터 폴더를 사용합니다. 이 창의 CLAUDE_SESSION_SHARE_HOME을 비우면 같은 폴더로 업데이트합니다.'
+        }
+        $env:CLAUDE_SESSION_SHARE_HOME = $Data
+        if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) { throw 'Windows 전용입니다.' }
         $probeName = ".claude-session-share-probe-$PID"
         $probe = Join-Path $env:LOCALAPPDATA $probeName
-        [IO.File]::WriteAllText($probe, '')
-        $boxed = @(Get-ChildItem -LiteralPath $packages -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "LocalCache\Local\$probeName") } | Select-Object -First 1)
-        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
-        if ($boxed.Count) {
-            Say "이 창은 $($boxed[0].Name.Split('_')[0]) 같은 앱 안에서 연 터미널이라 여기서는 설치가 제대로 되지 않습니다(PC를 켤 때 자동 실행되지 않습니다)." 'Yellow'
-            Say '시작 단추 → powershell 입력 → Enter로 PowerShell을 따로 열어 같은 한 줄을 다시 붙여 넣으세요.' 'Yellow'
-            return
-        }
+        [IO.File]::WriteAllText($probe,'')
+        try {
+            $boxed = Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'Packages') -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "LocalCache\Local\$probeName") } | Select-Object -First 1
+            if ($boxed) { throw '이 창은 AppData가 다른 위치로 연결된 앱 안의 터미널입니다. 시작 메뉴에서 PowerShell을 열어 설치하세요.' }
+        } finally { [IO.File]::Delete($probe) }
 
-        # 2. Node.js 20 이상
-        $node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $node) {
-            Say 'Node.js가 없습니다. 먼저 Node.js(LTS)를 설치하세요.' 'Yellow'
-            Say '  https://nodejs.org 에서 초록색 LTS 단추로 받아 설치  (또는 이 창에서: winget install OpenJS.NodeJS.LTS)' 'Yellow'
-            Say '설치가 끝나면 이 창을 닫고 PowerShell을 새로 열어 같은 한 줄을 다시 붙여 넣으세요(이 창은 방금 설치한 Node.js를 못 찾습니다).' 'Yellow'
-            return
-        }
-        $version = (& $node.Source --version | Out-String).Trim()
-        $major = 0
-        if ($version -match '^v(\d+)\.') { $major = [int]$Matches[1] }
-        if ($major -lt 20) {
-            Say "Node.js $version 은(는) 너무 오래됐습니다. 20 이상(LTS)이 필요합니다." 'Yellow'
-            Say '  https://nodejs.org 에서 LTS를 받아 설치  (또는 이 창에서: winget install OpenJS.NodeJS.LTS)' 'Yellow'
-            Say '설치가 끝나면 PowerShell을 새로 열어 같은 한 줄을 다시 붙여 넣으세요.' 'Yellow'
-            return
-        }
-        $NodeExe = $node.Source
-        # fnm처럼 창마다 바뀌는 임시 경로면 실제 node.exe 위치를 쓴다(로그인할 때도 찾을 수 있게).
-        if ($NodeExe -match 'fnm_multishells') { $NodeExe = (& $NodeExe -p 'process.execPath' | Out-String).Trim() }
-        Say "  Node.js $version  ($NodeExe)"
+        if (-not [Environment]::Is64BitOperatingSystem) { Install-Legacy; return }
 
-        # 3. Claude 데스크톱 세션 폴더(스토어판 또는 일반 설치판)
-        $roots = @()
-        if (Test-Path -LiteralPath $packages) {
-            $roots += @(Get-ChildItem -LiteralPath $packages -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'LocalCache\Roaming\Claude' })
+        [IO.Directory]::CreateDirectory($InstallDir) | Out-Null
+        [IO.Directory]::CreateDirectory($Data) | Out-Null
+        $lock = [IO.File]::Open((Join-Path $InstallDir '.install.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+        $stage = Join-Path $InstallDir ('.install-' + [guid]::NewGuid().ToString('N'))
+        [IO.Directory]::CreateDirectory($stage) | Out-Null
+        $newExe = Join-Path $stage 'claude-session-share.exe'
+        $remove = Join-Path $stage 'uninstall.ps1'
+        $shim = Join-Path $stage 'compat.mjs'
+        $notices = Join-Path $stage 'NOTICES.txt'
+        Fetch 'dist/windows-x64/claude-session-share.exe' $newExe
+        if ((File-Digest $newExe) -ne $ExpectedHash) { throw '받은 실행 파일의 SHA-256이 이 설치 판과 다릅니다. 설치 한 줄을 다시 실행하세요.' }
+        $check = New-Object Diagnostics.ProcessStartInfo
+        $check.FileName = $newExe
+        $check.Arguments = '--help'
+        $check.UseShellExecute = $false
+        $check.CreateNoWindow = $true
+        $check.RedirectStandardOutput = $true
+        try { $test = [Diagnostics.Process]::Start($check) }
+        catch {
+            $cause = $_.Exception.GetBaseException()
+            if ($cause -is [ComponentModel.Win32Exception] -and $cause.NativeErrorCode -in 193,216 -and
+                ($env:PROCESSOR_ARCHITECTURE -like 'ARM*' -or $env:PROCESSOR_ARCHITEW6432 -like 'ARM*')) {
+                Install-Legacy
+                return
+            }
+            throw
         }
-        # 스토어판은 2026-10-19부터 데이터를 패키지 밖 %LOCALAPPDATA%\Claude-Data\claude_*로 통째로 옮기기도 한다.
-        $outside = Join-Path $env:LOCALAPPDATA 'Claude-Data'
-        if (Test-Path -LiteralPath $outside) {
-            $roots += @(Get-ChildItem -LiteralPath $outside -Directory -Filter 'claude_*' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        try {
+            $null = $test.StandardOutput.ReadToEnd()
+            $test.WaitForExit()
+            if ($test.ExitCode -ne 0) { throw '이 PC에서 실행 파일을 시작할 수 없습니다.' }
+        } finally { $test.Dispose() }
+        Fetch 'uninstall.ps1' $remove
+        Fetch 'claude-session-share.mjs' $shim
+        Fetch 'dist/windows-x64/NOTICES.txt' $notices
+
+        $vbs = Join-Path $stage 'startup.vbs'
+        $nativeEsc = $Native.Replace('"','""')
+        $launcher = 'CreateObject("WScript.Shell").Run """' + $nativeEsc + '""", 0, False'
+        [IO.File]::WriteAllText($vbs, $launcher, [Text.Encoding]::Unicode)
+        $workers = @(Get-Watchers)
+        if ($workers.Count -gt 1) { throw '설치 경로에서 지켜보기가 여러 개 실행 중입니다.' }
+        if ($workers.Count -and (-not [IO.File]::Exists($PidPath) -or [IO.File]::ReadAllText($PidPath).Trim() -ne [string]$workers[0].ProcessId)) {
+            throw '현재 지켜보기의 데이터 폴더와 설치 설정이 다릅니다. 사용하던 CLAUDE_SESSION_SHARE_HOME으로 다시 실행하세요.'
         }
-        $roots += Join-Path $env:APPDATA 'Claude'
-        $found = @($roots | Where-Object { (Test-Path -LiteralPath (Join-Path $_ 'claude-code-sessions')) -or (Test-Path -LiteralPath (Join-Path $_ 'local-agent-mode-sessions')) })
-        if ($found.Count -eq 0) {
-            Say '  아직 Code 탭을 쓴 적이 없는 것 같습니다(세션 폴더가 없음). 설치는 그대로 끝나고, Code 탭을 쓰기 시작하면 자동으로 맞춥니다.' 'Yellow'
-        } else {
-            foreach ($r in $found) { Say "  Claude 데이터: $r" }
-        }
-
-        # 4. 새 파일을 먼저 받아 둔다(받기에 실패하면 지금 설치는 그대로 둔다)
-        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-        # 상태 파일은 첫 맞추기가 끝나야 생긴다. 그래서 첫 맞추기가 실패했다면 다시 실행할 때도 전체 백업부터 한다.
-        $Updating = Test-Path -LiteralPath $StatePath
-        $newScript = Get-RepoFile 'claude-session-share.mjs'
-        $newUninstall = Get-RepoFile 'uninstall.ps1'
-        Say ('  스크립트: ' + $(if ($Here) { "$Here 에서 복사" } else { "$BaseUrl 에서 받음" }))
-
-        # 5. 돌고 있는 지켜보기를 멈추고 새 파일로 바꾼다
-        Stop-Watchers
-        Move-Item -LiteralPath $newScript -Destination $ScriptPath -Force
-        Move-Item -LiteralPath $newUninstall -Destination $UninstallPath -Force
-        Say "  설치 폴더: $InstallDir"
-
-        # 6. 시작프로그램에 등록(PC를 켜고 윈도에 로그인할 때 node를 창 없이 띄운다). 경로에 한글이 있어도 되게 UTF-16으로 쓴다.
-        $vbs = @"
-' claude-session-share: starts the session-share watcher at logon (written by install.ps1)
-CreateObject("WScript.Shell").Run """$NodeExe"" ""$ScriptPath""", 0, False
-"@
-        [IO.File]::WriteAllText($VbsPath, $vbs, [Text.Encoding]::Unicode)
-        Say "  자동 실행(PC를 켤 때): $VbsPath"
-
-        # 7. 처음 설치면 모든 계정 폴더를 통째로 백업한 뒤 한 번 맞춘다
-        if (-not $Updating) {
-            Say '  처음 맞추기 전에 모든 계정 폴더를 백업하고 한 번 맞춥니다...'
-            $r = Invoke-Node @('--once', '--backup')
-            if ($r.Code -ne 0) { Write-Host $r.Out; throw '처음 맞추기에 실패했습니다. 위 내용을 확인하세요(지켜보기는 켜지 않았습니다).' }
-            $line = @($r.Out -split "`r?`n" | Where-Object { $_ -match '^맞추기 전 전체 백업' }) | Select-Object -First 1
-            if ($line) { Say "  $line" }
-        }
-
-        # 8. 지켜보기 시작
-        Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
-        Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList "`"$VbsPath`""
-        $started = 0
-        for ($i = 0; $i -lt 60 -and -not $started; $i++) {
-            Start-Sleep -Milliseconds 250
-            if (Test-Path -LiteralPath $PidPath) {
-                $id = 0
-                if ([int]::TryParse((Get-Content -LiteralPath $PidPath -Raw).Trim(), [ref]$id) -and (Get-Process -Id $id -ErrorAction SilentlyContinue)) { $started = $id }
+        $updating = [IO.File]::Exists($State)
+        $migrating = $updating -and ((-not [IO.File]::Exists($Native)) -or ($workers.Count -and $workers[0].Name -eq 'node.exe'))
+        Stop-Installed $workers
+        $stopped = $true
+        if (-not $updating -or $migrating -or -not $workers.Count) {
+            Write-Host '동기화 전에 세션 폴더를 백업합니다.'
+            & $newExe --backup-only
+            if ($LASTEXITCODE -ne 0) { throw '동기화 전 백업에 실패했습니다.' }
+            if ($updating) {
+                [IO.File]::Copy($State, (Join-Path $Data ('claude-session-share.before-native-' + [guid]::NewGuid().ToString('N') + '.json')))
             }
         }
-        if (-not $started) { throw "지켜보기가 15초 안에 시작되지 않았습니다. 직접 실행해 오류를 보세요:  node `"$ScriptPath`"" }
-        Say "  지켜보기 시작 (pid $started)" 'Green'
-
-        # 9. 상태
-        Say ''
-        $s = Invoke-Node @('--status')
-        Write-Host $s.Out.TrimEnd()
-        Say ''
-        if ($Updating) {
-            Say '업데이트했습니다. 자동 맞춤(지켜보기)이 새 스크립트로 다시 돌고 있습니다.' 'Green'
-        } else {
-            Say '설치했습니다. 위의 표는 계정 폴더 상태이고 에러가 아닙니다.' 'Green'
-            Say '이제 Claude를 완전히 껐다 켜세요. 창의 X는 숨기기일 뿐이니, 작업 표시줄 오른쪽 아래 ^ 안의 Claude 아이콘을 마우스 오른쪽 클릭해 종료(Quit)한 뒤 다시 실행합니다.' 'Green'
-            Say '그러면 이 PC에서 로그인한 적 있는 모든 계정의 세션이 Code 탭에 보입니다.' 'Green'
+        $stagedHome = Join-Path $stage 'runtime-home.txt'
+        [IO.File]::WriteAllText($stagedHome, $Data)
+        Save-Original $HomeFile $stagedHome
+        Save-Original $Native $newExe
+        Save-Original (Join-Path $InstallDir 'NOTICES.txt') $notices
+        Save-Original (Join-Path $InstallDir 'uninstall.ps1') $remove
+        Save-Original $Legacy $shim
+        Save-Original $Startup $vbs
+        Start-Entry
+        $started = $true
+        for ($i=0; $i -lt 120; $i++) {
+            Start-Sleep -Milliseconds 250
+            if ([IO.File]::Exists($PidPath)) {
+                $watchId = 0
+                if ([int]::TryParse([IO.File]::ReadAllText($PidPath).Trim(), [ref]$watchId)) {
+                    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$watchId" -ErrorAction SilentlyContinue
+                    if ($proc -and $proc.ExecutablePath -eq $Native) { break }
+                }
+            }
         }
-        Say "  상태 보기:      node `"$ScriptPath`" --status"
-        Say "  끄고 싶을 때:   irm $BaseUrl/uninstall.ps1 | iex"
+        if (-not $proc -or $proc.ExecutablePath -ne $Native) { throw '30초 안에 설치된 지켜보기를 확인하지 못했습니다.' }
+        # The daemon handles --once under its own lock and replies after saving state.
+        & $Native --once
+        if ($LASTEXITCODE -ne 0 -or -not (Get-Process -Id $watchId -ErrorAction SilentlyContinue)) { throw '지켜보기가 첫 동기화를 마치지 못했습니다.' }
+        if ($updating) { Write-Host '업데이트했습니다. Rust 지켜보기가 실행 중입니다.' -ForegroundColor Green }
+        else { Write-Host '설치했습니다. 작업 표시줄에서 Claude를 완전히 종료한 뒤 다시 실행하세요.' -ForegroundColor Green }
     } catch {
-        Write-Host ''
-        Write-Host "설치하지 못했습니다: $($_.Exception.Message)" -ForegroundColor Red
+        $reason = $_
+        $restoreErrors = New-Object 'System.Collections.Generic.List[string]'
+        if ($started) {
+            try { Stop-Installed @(Get-Watchers) } catch { $restoreErrors.Add($_.Exception.Message) }
+        }
+        for ($i=$changes.Count-1; $i -ge 0; $i--) {
+            $entry = $changes[$i]
+            try {
+                if ($entry.Saved) { [IO.File]::Copy($entry.Saved,$entry.Path,$true) }
+                else { [IO.File]::Delete($entry.Path) }
+            } catch { $restoreErrors.Add("$($entry.Path): $($_.Exception.Message)") }
+        }
+        if (-not $restoreErrors.Count -and $stopped -and $workers.Count) {
+            try {
+                if ([IO.File]::Exists($Startup)) { Start-Entry }
+                elseif ($workers[0].Name -eq 'node.exe') { Start-Process -FilePath $workers[0].ExecutablePath -ArgumentList ('"' + $Legacy + '"') -WindowStyle Hidden }
+                else { Start-Process -FilePath $Native -WindowStyle Hidden }
+            } catch { $restoreErrors.Add($_.Exception.Message) }
+        }
+        if ($restoreErrors.Count) {
+            $keepStage = $true
+            $changes | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'rollback.json') -Encoding UTF8
+            throw "설치와 복구를 마치지 못했습니다. 복구 파일: $stage. $($reason.Exception.Message) $($restoreErrors -join ' / ')"
+        }
+        throw "설치하지 못했습니다. $($reason.Exception.Message)"
+    } finally {
+        if (-not $keepStage -and $stage -and [IO.Directory]::Exists($stage) -and [IO.Path]::GetDirectoryName($stage) -eq $InstallDir -and [IO.Path]::GetFileName($stage) -match '^\.install-[a-f0-9]{32}$') {
+            [IO.Directory]::Delete($stage,$true)
+        }
+        if ($lock) { $lock.Dispose() }
+        $env:CLAUDE_SESSION_SHARE_HOME = $originalHome
     }
 # end of body
 '@

@@ -7,10 +7,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { command, args, testRoot, sandboxEnv } from "../test-support/runner.mjs";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SCRIPT = process.env.CLAUDE_SESSION_SHARE_SCRIPT || path.join(HERE, "..", "claude-session-share.mjs");
 const ORG = "0000000a-0000-4000-8000-00000000000f";
 const ACCT = { A: "aaaaaaaa-0000-4000-8000-000000000001", B: "bbbbbbbb-0000-4000-8000-000000000002", C: "cccccccc-0000-4000-8000-000000000003", D: "dddddddd-0000-4000-8000-000000000004" };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -27,19 +25,14 @@ const twoLogins = () => initLine(ACCT.B, 0, "2026-10-20 08:50:58") + initLine(AC
 const stamp = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
 
 function setup(name, who = ["A", "B"]) {
-  const root = path.join(HERE, "..", ".test-tmp", `eff-${name}`);
-  fs.rmSync(root, { recursive: true, force: true });
+  const root = path.join(testRoot, `eff-${name}`);
   const env = {
-    ...process.env,
+    ...sandboxEnv,
     USERPROFILE: path.join(root, "home"), HOME: path.join(root, "home"),
     LOCALAPPDATA: path.join(root, "local"), APPDATA: path.join(root, "roaming"),
     CLAUDE_SESSION_SHARE_HOME: path.join(root, "share"),
     CLAUDE_SESSION_SHARE_NOTIFY_FILE: path.join(root, "notify.txt"), // 진짜 윈도 알림을 띄우지 않는다
   };
-  delete env.CLAUDE_CONFIG_DIR;
-  delete env.CLAUDE_SESSION_SHARE_BATCH_MS;
-  delete env.CLAUDE_SESSION_SHARE_PARK_MIN_AGE_MS;
-  delete env.CLAUDE_SESSION_SHARE_VERBOSE;
   const logs = path.join(env.LOCALAPPDATA, "Claude", "logs");
   for (const d of [env.USERPROFILE, logs]) fs.mkdirSync(d, { recursive: true });
   const mainLog = path.join(logs, "main.log");
@@ -64,13 +57,13 @@ function setup(name, who = ["A", "B"]) {
     shareLog() { try { return fs.readFileSync(path.join(env.CLAUDE_SESSION_SHARE_HOME, "claude-session-share.log"), "utf8"); } catch { return ""; } },
     statePath: path.join(env.CLAUDE_SESSION_SHARE_HOME, "claude-session-share.json"),
     run(mode = "--once", extra = {}) {
-      const r = spawnSync(process.execPath, [SCRIPT, mode], { env: { ...env, ...extra }, encoding: "utf8" });
+      const r = spawnSync(command, [...args, mode], { env: { ...env, ...extra }, encoding: "utf8" });
       assert.equal(r.status, 0, r.stderr || r.stdout);
       return r.stdout;
     },
     // 지켜보기(시작프로그램이 띄우는 것과 같은 실행)를 띄운다. 시험이 끝나면 끈다.
     start(extra = {}) {
-      const c = spawn(process.execPath, [SCRIPT], { env: { ...env, ...extra }, stdio: "ignore", windowsHide: true });
+      const c = spawn(command, args, { env: { ...env, ...extra }, stdio: "ignore", windowsHide: true });
       children.push(c);
       return c;
     },

@@ -1,0 +1,24 @@
+[package]
+name = "claude-session-share"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Local session index synchronization for Claude Desktop on Windows"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+notify = { version = "8.2", default-features = false }
+regex = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
