@@ -24,7 +24,7 @@ $Body = @'
     $PidPath = Join-Path $Data 'claude-session-share.pid'
     $State = Join-Path $Data 'claude-session-share.json'
     $Startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'claude-session-share.vbs'
-    $ExpectedHash = '9A7D3CE70C1DE84884C161D869434D3E63DAC04A107EC7BB2142016E0AC02DDF'
+    $ExpectedHash = '1D2D661B1ED1F14F411B5DB3665AE98A1145DDDC795132E4232DF1E9E9354880'
 
     function Fetch([string]$relative, [string]$to) {
         if ($Here -and (Test-Path -LiteralPath (Join-Path $Here $relative) -PathType Leaf)) {

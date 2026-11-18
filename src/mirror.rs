@@ -60,7 +60,7 @@ impl Stamp {
     pub fn read(path: &Path) -> io::Result<Self> {
         Self::from_meta(&fs::metadata(path)?)
     }
-    fn from_meta(meta: &fs::Metadata) -> io::Result<Self> {
+    pub(crate) fn from_meta(meta: &fs::Metadata) -> io::Result<Self> {
         let modified = meta.modified()?;
         let ns = match modified.duration_since(UNIX_EPOCH) {
             Ok(d) => d.as_nanos() as i128,

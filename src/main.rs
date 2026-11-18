@@ -14,7 +14,7 @@ use std::{
     env, fs, io,
     path::{Path, PathBuf},
     process, thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub const TREES: [&str; 2] = ["claude-code-sessions", "local-agent-mode-sessions"];
@@ -35,6 +35,30 @@ pub fn env_ms(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+#[derive(Default)]
+struct BackupSchedule {
+    next: Option<Instant>,
+    retry: Duration,
+}
+
+impl BackupSchedule {
+    fn due(&self, now: Instant) -> bool {
+        self.next.is_none_or(|at| now >= at)
+    }
+
+    fn finished(&mut self, now: Instant, succeeded: bool) -> Duration {
+        let delay = if succeeded {
+            self.retry = Duration::ZERO;
+            Duration::from_secs(3600)
+        } else {
+            self.retry = (self.retry * 2).clamp(Duration::from_secs(30), Duration::from_secs(300));
+            self.retry
+        };
+        self.next = Some(now + delay);
+        delay
+    }
+}
+
 struct Daemon {
     paths: Paths,
     state: Value,
@@ -49,7 +73,7 @@ struct Daemon {
     last_scan: u64,
     last_family: u64,
     last_full: u64,
-    last_backup: u64,
+    backup_schedule: BackupSchedule,
     last_restore: u64,
     last_logout: u64,
     retry_at: u64,
@@ -76,7 +100,7 @@ impl Daemon {
             last_scan: 0,
             last_family: 0,
             last_full: 0,
-            last_backup: 0,
+            backup_schedule: BackupSchedule::default(),
             last_restore: 0,
             last_logout: 0,
             retry_at: 0,
@@ -227,10 +251,19 @@ impl Daemon {
         if filled > 0 && !history {
             platform::notify_filled(filled);
         }
-        if self.family.primary.is_some() && t.saturating_sub(self.last_backup) >= 3600000 {
-            self.last_backup = t;
-            if let Err(e) = backup::snapshot(&self.paths.data, &self.family.dirs, &self.state) {
-                platform::log(&format!("백업 실패: {e}"));
+        if self.family.primary.is_some()
+            && self.family.error.is_none()
+            && self.backup_schedule.due(Instant::now())
+        {
+            let result = backup::snapshot(&self.paths.data, &self.family.dirs, &self.state);
+            let delay = self
+                .backup_schedule
+                .finished(Instant::now(), result.is_ok());
+            if let Err(e) = result {
+                platform::log(&format!(
+                    "백업 실패: {e} ({}초 뒤 다시 시도)",
+                    delay.as_secs()
+                ));
             }
         }
         self.engine.expire_own();
@@ -493,5 +526,28 @@ fn main() {
     if let Err(e) = cli() {
         eprintln!("{e}");
         process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BackupSchedule, Duration, Instant};
+
+    #[test]
+    fn hourly_backup_retries_until_success_then_starts_a_new_hour() {
+        let mut schedule = BackupSchedule::default();
+        let mut clock = Instant::now();
+        assert!(schedule.due(clock));
+        for seconds in [30, 60, 120, 240, 300, 300] {
+            schedule.finished(clock, false);
+            clock += Duration::from_secs(seconds);
+            assert!(!schedule.due(clock - Duration::from_millis(1)));
+            assert!(schedule.due(clock));
+        }
+        schedule.finished(clock, true);
+        clock += Duration::from_secs(3600);
+        assert!(!schedule.due(clock - Duration::from_millis(1)));
+        assert!(schedule.due(clock));
+        assert_eq!(schedule.finished(clock, false), Duration::from_secs(30));
     }
 }

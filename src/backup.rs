@@ -1,13 +1,14 @@
 use crate::{
     discovery::count_records,
-    mirror::{backup_files, copy_stamped, is_link, pair, real_dir, temp_name},
+    mirror::{backup_files, is_link, pair, real_dir, temp_name, Stamp},
     platform::log,
     Family, TREES,
 };
 use chrono::Local;
 use serde_json::Value;
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -76,6 +77,95 @@ fn clear_abandoned(root: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+// A scan decides which snapshot is due. Each individual file gets its version and timestamp
+// from one open handle, so an atomic replacement of the source name cannot mix versions.
+enum Capture {
+    Linked,
+    Copied(u64),
+}
+
+fn open_source(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::File::options();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+fn capture_open(
+    source: &mut fs::File,
+    dest: &Path,
+    previous: Option<(&Path, Stamp)>,
+) -> io::Result<Capture> {
+    let before = source.metadata()?;
+    if !before.is_file() || is_link(&before) {
+        return Err(io::Error::other("백업 원본이 일반 파일이 아님"));
+    }
+    let stamp = Stamp::from_meta(&before)?;
+    if let Some((path, _)) = previous.filter(|(_, old)| *old == stamp) {
+        if fs::hard_link(path, dest).is_ok() {
+            return Ok(Capture::Linked);
+        }
+    }
+    let mut output = fs::File::create_new(dest)?;
+    let result = (|| {
+        let copied = io::copy(&mut source.take(stamp.s.saturating_add(1)), &mut output)?;
+        let after = source.metadata()?;
+        if copied != before.len()
+            || after.len() != before.len()
+            || before.modified()? != after.modified()?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "복사 중에 파일 내용이 바뀜",
+            ));
+        }
+        let modified = before.modified()?;
+        output.set_times(
+            fs::FileTimes::new()
+                .set_accessed(modified)
+                .set_modified(modified),
+        )?;
+        if before.permissions().readonly() {
+            output.set_permissions(before.permissions())?;
+        }
+        Ok(Capture::Copied(copied))
+    })();
+    drop(output);
+    if result.is_err() {
+        fs::remove_file(dest)?;
+    }
+    result
+}
+
+fn capture_file(
+    source: &Path,
+    dest: &Path,
+    previous: Option<(&Path, Stamp)>,
+) -> io::Result<Capture> {
+    for attempt in 0..4 {
+        match open_source(source).and_then(|mut f| capture_open(&mut f, dest, previous)) {
+            Err(e)
+                if attempt < 3
+                    && (matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::Interrupted
+                            | io::ErrorKind::NotFound
+                    ) || matches!(e.raw_os_error(), Some(32 | 33))) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10 << attempt));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
 pub fn snapshot(data: &Path, family: &Family, state: &Value) -> io::Result<()> {
     let Some(dirs) = family.get("claude-code-sessions") else {
         return Ok(());
@@ -113,18 +203,20 @@ pub fn snapshot(data: &Path, family: &Family, state: &Value) -> io::Result<()> {
     fs::create_dir(&tmp)?;
     let (mut copied, mut linked, mut bytes) = (0usize, 0usize, 0u64);
     let result = (|| {
-        for (rel, st) in &current {
+        for rel in current.keys() {
             let to = tmp.join(rel);
             fs::create_dir_all(to.parent().unwrap())?;
-            if let Some(prev) = previous.as_ref().filter(|_| base.get(rel) == Some(st)) {
-                if fs::hard_link(prev.join(rel), &to).is_ok() {
-                    linked += 1;
-                    continue;
+            let prior = previous
+                .as_ref()
+                .and_then(|dir| base.get(rel).map(|st| (dir.join(rel), *st)));
+            let candidate = prior.as_ref().map(|(p, st)| (p.as_path(), *st));
+            match capture_file(&src.join(rel), &to, candidate)? {
+                Capture::Linked => linked += 1,
+                Capture::Copied(n) => {
+                    copied += 1;
+                    bytes += n;
                 }
             }
-            copy_stamped(&src.join(rel), &to, *st)?;
-            copied += 1;
-            bytes += st.s;
         }
         fs::rename(&tmp, &dest)
     })();
@@ -163,7 +255,7 @@ fn copy_tree(src: &Path, to: &Path) -> io::Result<()> {
         if m.is_dir() {
             copy_tree(&e.path(), &target)?;
         } else if m.is_file() {
-            copy_stamped(&e.path(), &target, crate::mirror::Stamp::read(&e.path())?)?;
+            capture_file(&e.path(), &target, None)?;
         }
     }
     Ok(())
@@ -211,4 +303,58 @@ pub fn snapshot_all(data: &Path, roots: &[PathBuf]) -> io::Result<Option<PathBuf
         return Err(e);
     }
     Ok(Some(dest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn capture_uses_open_file_version_even_when_scan_or_path_is_stale() -> io::Result<()> {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("session-snapshot-{}-{nonce}", std::process::id()));
+        fs::create_dir(&root)?;
+        let run = || -> io::Result<()> {
+            let src = root.join("local_live.json");
+            let base = root.join("previous.json");
+            fs::write(&src, b"old")?;
+            let scanned = backup_files(&root)?["local_live.json"];
+            fs::write(&base, b"old")?;
+            // The scan suggested reusing the old hard link, but the app published a new version first.
+            let incoming = root.join("incoming");
+            fs::write(&incoming, b"fresh version")?;
+            fs::rename(&incoming, &src)?;
+            let dst = root.join("new-snapshot");
+            assert!(matches!(
+                capture_file(&src, &dst, Some((&base, scanned)))?,
+                Capture::Copied(13)
+            ));
+            assert_eq!(fs::read(&dst)?, b"fresh version");
+            assert_eq!(Stamp::read(&dst)?, Stamp::read(&src)?);
+            assert_eq!(fs::read(&base)?, b"old");
+
+            // A second atomic publish leaves the open file readable through its previous name's handle.
+            let mut opened = open_source(&src)?;
+            let expected = opened.metadata()?.modified()?;
+            fs::write(&incoming, b"next version")?;
+            fs::rename(&incoming, &src)?;
+            let full = root.join("full-snapshot");
+            assert!(matches!(
+                capture_open(&mut opened, &full, None)?,
+                Capture::Copied(13)
+            ));
+            assert_eq!(fs::read(full.clone())?, b"fresh version");
+            assert_eq!(fs::metadata(full)?.modified()?, expected);
+            assert_eq!(fs::read(src)?, b"next version");
+            Ok(())
+        };
+        let result = run();
+        fs::remove_dir_all(&root)?;
+        result
+    }
 }
