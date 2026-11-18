@@ -57,14 +57,22 @@ $Body = @'
     }
     function Stop-Installed($workers) {
         foreach ($p in $workers) {
-            if ($p.ExecutablePath -eq $Native) {
-                & $Native --stop
-                if ($LASTEXITCODE -ne 0) { throw '현재 지켜보기가 종료 요청을 처리하지 못했습니다.' }
-            } else {
-                Stop-Process -Id $p.ProcessId -ErrorAction Stop
-            }
-            Wait-Process -Id $p.ProcessId -Timeout 30 -ErrorAction SilentlyContinue
-            if (Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue) { throw "지켜보기가 아직 실행 중입니다. PID $($p.ProcessId)" }
+            $proc = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+            if (-not $proc) { continue }
+            try {
+                # Keep the handle for this instance. A terminated process can retain its PID
+                # while its launcher still holds a handle, and the PID can later be reused.
+                $null = $proc.Handle
+                if ($proc.HasExited) { continue }
+                if ([math]::Abs(($proc.StartTime - $p.CreationDate).TotalMilliseconds) -gt 2) { throw '지켜보기 프로세스가 바뀌었습니다.' }
+                if ($p.ExecutablePath -eq $Native) {
+                    & $Native --stop
+                    if ($LASTEXITCODE -ne 0) { throw '현재 지켜보기가 종료 요청을 처리하지 못했습니다.' }
+                } else {
+                    $proc.Kill()
+                }
+                if (-not $proc.WaitForExit(30000)) { throw "지켜보기가 아직 실행 중입니다. PID $($p.ProcessId)" }
+            } finally { $proc.Dispose() }
         }
     }
     function Start-Entry {

@@ -38,17 +38,25 @@ $Body = @'
             Where-Object { ($_.Name -eq 'node.exe' -and $_.CommandLine -match $WatcherPattern) -or
                 ($_.ExecutablePath -eq $Native -and $_.CommandLine -notmatch '\s--') })
         foreach ($p in $procs) {
-            if ($p.ExecutablePath -eq $Native) {
-                $originalHome = $env:CLAUDE_SESSION_SHARE_HOME
-                try {
-                    $homeFile = Join-Path $InstallDir 'runtime-home.txt'
-                    if ([IO.File]::Exists($homeFile)) { $env:CLAUDE_SESSION_SHARE_HOME = [IO.File]::ReadAllText($homeFile).Trim() }
-                    & $Native --stop
-                } finally { $env:CLAUDE_SESSION_SHARE_HOME = $originalHome }
-                if ($LASTEXITCODE -ne 0) { throw '지켜보기를 멈추지 못했습니다.' }
-            } else { Stop-Process -Id $p.ProcessId -ErrorAction Stop }
-            Wait-Process -Id $p.ProcessId -Timeout 30 -ErrorAction SilentlyContinue
-            if (Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue) { throw '지켜보기가 아직 실행 중입니다.' }
+            $proc = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+            if (-not $proc) { continue }
+            try {
+                # Keep the handle for this instance. A terminated process can retain its PID
+                # while its launcher still holds a handle, and the PID can later be reused.
+                $null = $proc.Handle
+                if ($proc.HasExited) { continue }
+                if ([math]::Abs(($proc.StartTime - $p.CreationDate).TotalMilliseconds) -gt 2) { throw '지켜보기 프로세스가 바뀌었습니다.' }
+                if ($p.ExecutablePath -eq $Native) {
+                    $originalHome = $env:CLAUDE_SESSION_SHARE_HOME
+                    try {
+                        $homeFile = Join-Path $InstallDir 'runtime-home.txt'
+                        if ([IO.File]::Exists($homeFile)) { $env:CLAUDE_SESSION_SHARE_HOME = [IO.File]::ReadAllText($homeFile).Trim() }
+                        & $Native --stop
+                    } finally { $env:CLAUDE_SESSION_SHARE_HOME = $originalHome }
+                    if ($LASTEXITCODE -ne 0) { throw '지켜보기를 멈추지 못했습니다.' }
+                } else { $proc.Kill() }
+                if (-not $proc.WaitForExit(30000)) { throw "지켜보기가 아직 실행 중입니다. PID $($p.ProcessId)" }
+            } finally { $proc.Dispose() }
             Say "  지켜보기를 멈췄습니다 (pid $($p.ProcessId))"
         }
         if ($procs.Count -eq 0) { Say '  돌고 있는 지켜보기가 없습니다.' }
